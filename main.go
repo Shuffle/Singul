@@ -2,13 +2,30 @@ package main
 
 import (
 	"os"
+	"context"
+	"net/http"
 	//"fmt"
 	"log"
 	"github.com/spf13/cobra"
+	"github.com/shuffle/shuffle-shared"
+
+	"singul/pkg"
 )
 
+// Singul -> Shuffle-shared?
+// OR
+// Shuffle-shared -> Singul?
 func runSingul(args []string, flags map[string]string) {
 	log.Printf("Running Singul with args: %v and flags: %v\n", args, flags)
+
+	ctx := context.Background()
+	value := shuffle.CategoryAction{
+
+	}
+
+	resp := http.ResponseWriter(nil)
+	request := http.Request{}
+	singul.RunAction(ctx, shuffle.User{}, value, resp, &request)
 }
 
 func rootCmdRun(cmd *cobra.Command, args []string) {
