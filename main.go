@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"context"
-	"net/http"
 	//"fmt"
 	"log"
 	"github.com/spf13/cobra"
@@ -18,14 +17,22 @@ import (
 func runSingul(args []string, flags map[string]string) {
 	log.Printf("Running Singul with args: %v and flags: %v\n", args, flags)
 
+	if len(os.Getenv("SHUFFLE_BACKEND")) == 0 {
+		os.Setenv("SHUFFLE_BACKEND", "https://shuffler.io")
+	}
+
 	ctx := context.Background()
 	value := shuffle.CategoryAction{
 
 	}
 
-	resp := http.ResponseWriter(nil)
-	request := http.Request{}
-	singul.RunAction(ctx, shuffle.User{}, value, resp, &request)
+	// Make a fake ResponseWrite that can actaully receive data
+	data, err := singul.RunAction(ctx, value)
+	if err != nil {
+		log.Printf("[ERROR] Failed running action: %v", err)
+	}
+
+	log.Printf("DATA: %#v. ERR: %#v", string(data), err)
 }
 
 func rootCmdRun(cmd *cobra.Command, args []string) {

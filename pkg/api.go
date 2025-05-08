@@ -1,27 +1,32 @@
-package singul 
+package singul
 
 import (
-	"os"
-	"io/ioutil"
-	"fmt"
-	"strings"
-	"log"
 	"bytes"
 	"context"
-	"encoding/json"
 	"crypto/md5"
-	"sort"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/ioutil"
+	"log"
 	"net/http"
+	"os"
+	"sort"
+	"strings"
 	"time"
 
 	uuid "github.com/satori/go.uuid"
 
-	"github.com/shuffle/shuffle-shared"
 	"github.com/frikky/schemaless"
+	"github.com/shuffle/shuffle-shared"
 )
 
-var basepath = os.Getenv("SHUFFLE_FILE_LOCATION")
 var debug = os.Getenv("DEBUG") == "true"
+var basepath = os.Getenv("SHUFFLE_FILE_LOCATION")
+
+// Set up 3rd party connections IF necessary
+var shuffleApiKey = os.Getenv("SHUFFLE_AUTHORIZATION")
+var shuffleBackend = os.Getenv("SHUFFLE_BACKEND")
 
 // Apps to test:
 // Communication: Slack & Teams -> Send message
@@ -146,10 +151,40 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 		}
 	}
 
-	RunAction(ctx, user, value, resp, request)
+	RunActionWrapper(ctx, user, value, resp, request)
 }
 
-func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAction, resp http.ResponseWriter, request *http.Request) {
+type outputMarshal struct {
+	Success bool `json:"success"`
+	Reason  string `json:"reason"`
+}
+
+func RunAction(ctx context.Context, value shuffle.CategoryAction) (string, error) {
+	resp := http.ResponseWriter(nil)
+	request := &http.Request{}
+	user := shuffle.User{}
+
+	foundResponse, err := RunActionWrapper(ctx, user, value, resp, request)
+
+	if strings.Contains(string(foundResponse), `success": false`) {
+		outputString := outputMarshal{}
+
+		jsonerr := json.Unmarshal(foundResponse, &outputString)
+		if jsonerr != nil {
+			log.Printf("[WARNING] Error with unmarshaling output in run action: %s", jsonerr)
+		}
+
+		return outputString.Reason, err
+	}
+
+	return string(foundResponse), err
+}
+
+func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.CategoryAction, resp http.ResponseWriter, request *http.Request) ([]byte, error) {
+	// Ensures avoidance of nil-pointers in resp.WriteHeader()
+	if resp == nil {
+		resp = NewFakeResponseWriter() 
+	}
 
 	if len(value.AppName) == 0 && len(value.App) > 0 {
 		value.AppName = value.App
@@ -157,6 +192,14 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 
 	if len(value.Label) == 0 && len(value.Action) > 0 {
 		value.Label = value.Action
+	}
+
+	respBody := []byte{}
+	if len(value.Label) == 0 {
+		respBody = []byte(`{"success": false, "reason": "No label set in category action"}`)
+		resp.WriteHeader(400)
+		resp.Write(respBody)
+		return respBody, fmt.Errorf("No label set in category action")
 	}
 
 	log.Printf("[INFO] Running category-action '%s' in category '%s' with app %s for org %s (%s)", value.Label, value.Category, value.AppName, user.ActiveOrg.Name, user.ActiveOrg.Id)
@@ -249,9 +292,10 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 	newapps, err := shuffle.GetPrioritizedApps(ctx, user)
 	if err != nil {
 		log.Printf("[WARNING] Failed getting apps in category action: %s", err)
+		respBody = []byte(`{"success": false, "reason": "Failed loading apps. Contact support@shuffler.io"}`)
 		resp.WriteHeader(500)
-		resp.Write([]byte(`{"success": false, "reason": "Failed loading apps. Contact support@shuffler.io"}`))
-		return
+		resp.Write(respBody)
+		return respBody, err
 	}
 
 	org, err := shuffle.GetOrg(ctx, user.ActiveOrg.Id)
@@ -308,14 +352,15 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 		jsonBytes, err := json.Marshal(structuredFeedback)
 		if err != nil {
 			log.Printf("[ERROR] Failed marshaling structured feedback in category action: %s", err)
+			respBody = []byte(`{"success": false, "reason": "Failed marshaling structured feedback. Contact"}`)
 			resp.WriteHeader(500)
-			resp.Write([]byte(`{"success": false, "reason": "Failed marshaling structured feedback. Contact"}`))
-			return
+			resp.Write(respBody)
+			return respBody, err
 		}
 
 		resp.WriteHeader(400)
 		resp.Write(jsonBytes)
-		return
+		return jsonBytes, nil
 	} else {
 		if len(foundCategory.Name) > 0 {
 			log.Printf("[DEBUG] Found app for category %s: %s (%s)", foundAppType, foundCategory.Name, foundCategory.ID)
@@ -434,9 +479,10 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 		}
 
 		if failed {
+			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed finding an app with the name or ID '%s'. Explain more clearly what app you would like to run with."}`, value.AppName))
 			resp.WriteHeader(500)
-			resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed finding an app with the name or ID '%s'. Explain more clearly what app you would like to run with."}`, value.AppName)))
-			return
+			resp.Write(respBody)
+			return respBody, fmt.Errorf("Failed finding an app with the name or ID '%s'", value.AppName)
 		}
 	}
 
@@ -512,9 +558,10 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 		//selectedApp := AutofixAppLabels(selectedApp, value.Label)
 
 		if value.Label != "app_authentication" && value.Label != "authenticate_app" && value.Label != "discover_app" {
+			respBody = []byte(fmt.Sprintf(`{"success": false, "app_id": "%s", "reason": "Failed finding action '%s' labeled in app '%s'. If this is wrong, please suggest a label by finding the app in Shuffle (%s), OR contact support@shuffler.io and we can help with labeling."}`, selectedApp.ID, value.Label, strings.ReplaceAll(selectedApp.Name, "_", " "), fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID)))
 			resp.WriteHeader(500)
-			resp.Write([]byte(fmt.Sprintf(`{"success": false, "app_id": "%s", "reason": "Failed finding action '%s' labeled in app '%s'. If this is wrong, please suggest a label by finding the app in Shuffle (%s), OR contact support@shuffler.io and we can help with labeling."}`, selectedApp.ID, value.Label, strings.ReplaceAll(selectedApp.Name, "_", " "), fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID))))
-			return
+			resp.Write(respBody)
+			return respBody, fmt.Errorf("Failed finding action '%s' labeled in app '%s'", value.Label, selectedApp.Name)
 		} else {
 			//log.Printf("[DEBUG] NOT sending back due to label %s", value.Label)
 		}
@@ -834,9 +881,10 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 			jsonFormatted, err := json.MarshalIndent(structuredFeedback, "", "    ")
 			if err != nil {
 				log.Printf("[WARNING] Failed marshalling structured feedback: %s", err)
+				respBody = []byte(`{"success": false, "reason": "Failed formatting your data"}`)
 				resp.WriteHeader(500)
-				resp.Write([]byte(`{"success": false, "reason": "Failed formatting your data"}`))
-				return
+				resp.Write(respBody)
+				return respBody, err
 			}
 
 			// Replace \u0026 with &
@@ -844,7 +892,7 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 
 			resp.WriteHeader(400)
 			resp.Write(jsonFormatted)
-			return
+			return jsonFormatted, nil
 		}
 	}
 
@@ -882,14 +930,15 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 		jsonFormatted, err := json.Marshal(structuredFeedback)
 		if err != nil {
 			log.Printf("[WARNING] Failed marshalling structured feedback: %s", err)
+			respBody = []byte(`{"success": false, "reason": "Failed formatting your data"}`)
 			resp.WriteHeader(500)
-			resp.Write([]byte(`{"success": false, "reason": "Failed formatting your data"}`))
-			return
+			resp.Write(respBody)
+			return respBody, err
 		}
 
 		resp.WriteHeader(400)
 		resp.Write(jsonFormatted)
-		return
+		return jsonFormatted, nil
 	}
 
 	if !value.SkipWorkflow {
@@ -1288,9 +1337,10 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 		marshalledBody, err := json.Marshal(newQueryInput)
 		if err != nil {
 			log.Printf("[WARNING] Failed marshalling action: %s", err)
+			respBody = []byte(`{"success": false, "reason": "Failed marshalling action"}`)
 			resp.WriteHeader(500)
-			resp.Write([]byte(`{"success": false, "reason": "Failed marshalling action"}`))
-			return
+			resp.Write(respBody)
+			return respBody, err
 		}
 
 		//streamUrl = "http://localhost:5002"
@@ -1310,9 +1360,10 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 
 		if err != nil {
 			log.Printf("[WARNING] Error in new request for execute generated workflow: %s", err)
+			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed preparing new request. Contact support."}`))
 			resp.WriteHeader(500)
-			resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed preparing new request. Contact support."}`)))
-			return
+			resp.Write(respBody)
+			return respBody, err
 		}
 
 		log.Printf("[DEBUG] MISSINGFIELDS: %#v", missingFields)
@@ -1327,18 +1378,20 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 		newresp, err := client.Do(req)
 		if err != nil {
 			log.Printf("[WARNING] Error running body for execute generated workflow: %s", err)
+			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running app %s (%s). Contact support."}`, selectedAction.Name, selectedAction.AppID))
 			resp.WriteHeader(500)
-			resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed running app %s (%s). Contact support."}`, selectedAction.Name, selectedAction.AppID)))
-			return
+			resp.Write(respBody)
+			return respBody, err
 		}
 
 		defer newresp.Body.Close()
 		responseBody, err := ioutil.ReadAll(newresp.Body)
 		if err != nil {
 			log.Printf("[WARNING] Failed reading body for execute generated workflow: %s", err)
+			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed unmarshalling app response. Contact support."}`))
 			resp.WriteHeader(500)
-			resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed unmarshalling app response. Contact support."}`)))
-			return
+			resp.Write(respBody)
+			return respBody, err
 		}
 
 		//log.Printf("\n\n[DEBUG] TRANSLATED REQUEST RETURNED: %s\n\n", string(responseBody))
@@ -1346,7 +1399,7 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 			log.Printf("[WARNING] Failed running app %s (%s). Contact support.", selectedAction.Name, selectedAction.AppID)
 			resp.WriteHeader(500)
 			resp.Write(responseBody)
-			return
+			return responseBody, err
 		}
 
 		// Unmarshal responseBody back to
@@ -1354,9 +1407,10 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 		err = json.Unmarshal(responseBody, &newSecondAction)
 		if err != nil {
 			log.Printf("[WARNING] Failed unmarshalling body for execute generated workflow: %s %+v", err, string(responseBody))
+			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed parsing app response. Contact support if this persists."}`))
 			resp.WriteHeader(500)
-			resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed parsing app response. Contact support if this persists."}`)))
-			return
+			resp.Write(respBody)
+			return respBody, err
 		}
 
 		log.Printf("[DEBUG] Taking params and image from second action and adding to workflow")
@@ -1396,9 +1450,10 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 		//log.Printf("[DEBUG] Skipping workflow generation, and instead attempting to directly run the action. This is only applicable IF the action is atomic (skip_workflow=true).")
 		if len(missingFields) > 0 {
 			log.Printf("[WARNING] Not all required fields were found in category action. Want: %#v in action %s", missingFields, selectedAction.Name)
+			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Not all required fields are set", "label": "%s", "missing_fields": "%s", "action": "%s", "api_debugger_url": "%s"}`, value.Label, strings.Join(missingFields, ","), selectedAction.Name, fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID)))
 			resp.WriteHeader(400)
-			resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Not all required fields are set", "label": "%s", "missing_fields": "%s", "action": "%s", "api_debugger_url": "%s"}`, value.Label, strings.Join(missingFields, ","), selectedAction.Name, fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID))))
-			return
+			resp.Write(respBody)
+			return respBody, errors.New("Not all required fields were found")
 		}
 
 		// FIXME: Make a check for IF we have filled in all fields or not
@@ -1418,9 +1473,10 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 		preparedAction, err := json.Marshal(secondAction)
 		if err != nil {
 			log.Printf("[WARNING] Failed marshalling action in category run for app %s: %s", secondAction.AppID, err)
+			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed marshalling action"}`))
 			resp.WriteHeader(500)
-			resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed marshalling action"}`)))
-			return
+			resp.Write(respBody)
+			return respBody, err
 		}
 
 		// FIXME: Delete disabled for now (April 2nd 2024)
@@ -1484,9 +1540,10 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 
 			if err != nil {
 				log.Printf("[WARNING] Error in new request for execute generated app run: %s", err)
+				respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed preparing new request. Contact support."}`))
 				resp.WriteHeader(500)
-				resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed preparing new request. Contact support."}`)))
-				return
+				resp.Write(respBody)
+				return respBody, err
 			}
 
 			for key, value := range request.Header {
@@ -1500,9 +1557,10 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 			newresp, err := client.Do(req)
 			if err != nil {
 				log.Printf("[WARNING] Error running body for execute generated app run: %s", err)
+				respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running generated app. Contact support."}`))
 				resp.WriteHeader(500)
-				resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed running generated app. Contact support."}`)))
-				return
+				resp.Write(respBody)
+				return respBody, err
 			}
 
 			// Ensures frontend has something to debug if things go wrong
@@ -1522,9 +1580,10 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 			apprunBody, err := ioutil.ReadAll(newresp.Body)
 			if err != nil {
 				log.Printf("[WARNING] Failed reading body for execute generated app run: %s", err)
+				respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed unmarshalling app response. Contact support."}`))
 				resp.WriteHeader(500)
-				resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed unmarshalling app response. Contact support."}`)))
-				return
+				resp.Write(respBody)
+				return respBody, err
 			}
 
 			// Parse success struct
@@ -1538,14 +1597,14 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 
 				resp.WriteHeader(400)
 				resp.Write(apprunBody)
-				return
+				return apprunBody, errors.New("Failed running app")
 			}
 
 			// Input value to get raw output instead of translated
 			if value.SkipOutputTranslation {
 				resp.WriteHeader(202)
 				resp.Write(apprunBody)
-				return
+				return apprunBody, nil
 			}
 
 			parsedTranslation := shuffle.SchemalessOutput{
@@ -1733,7 +1792,7 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 						if err != nil {
 							resp.WriteHeader(202)
 							resp.Write(apprunBody)
-							return
+							return apprunBody, nil 
 						}
 
 						log.Printf("\n\nRUNNING WITH NEW PARAMS. Index: %d\n\n", i)
@@ -1752,12 +1811,12 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 					log.Printf("[WARNING] Failed marshalling schemaless output for label %s: %s", value.Label, err)
 					resp.WriteHeader(400)
 					resp.Write(apprunBody)
-					return
+					return apprunBody, err
 				}
 
 				resp.WriteHeader(400)
 				resp.Write(marshalledOutput)
-				return
+				return marshalledOutput, err
 			}
 
 			// Unmarshal responseBody back to secondAction
@@ -1825,13 +1884,12 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 				log.Printf("[WARNING] Failed marshalling schemaless output for label %s: %s", value.Label, err)
 				resp.WriteHeader(202)
 				resp.Write(schemalessOutput)
-				return
+				return schemalessOutput, err
 			}
 
 			resp.WriteHeader(200)
 			resp.Write(marshalledOutput)
-
-			return
+			return marshalledOutput, nil
 
 		}
 
@@ -1988,10 +2046,11 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 			}
 		}
 
-		resp.Write([]byte(fmt.Sprintf(`{"success": true, "dry_run": true, "workflow_id": "%s", "reason": "Steps built, but workflow not executed"}`, parentWorkflow.ID)))
+		successOutput := []byte(fmt.Sprintf(`{"success": true, "dry_run": true, "workflow_id": "%s", "reason": "Steps built, but workflow not executed"}`, parentWorkflow.ID))
+		resp.Write(successOutput)
 		resp.WriteHeader(200)
 
-		return
+		return successOutput, nil
 	}
 
 	// FIXME: Make dynamic? AKA input itself is what controls the workflow?
@@ -2028,27 +2087,30 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 	)
 	if err != nil {
 		log.Printf("[WARNING] Error in new request for execute generated workflow: %s", err)
+		respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed preparing new request. Contact support."}`))
 		resp.WriteHeader(500)
-		resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed preparing new request. Contact support."}`)))
-		return
+		resp.Write(respBody)
+		return respBody, err
 	}
 
 	req.Header.Add("Authorization", request.Header.Get("Authorization"))
 	newresp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[WARNING] Error running body for execute generated workflow: %s", err)
+		respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running generated app. Contact support."}`))
 		resp.WriteHeader(500)
-		resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed running generated app. Contact support."}`)))
-		return
+		resp.Write(respBody)
+		return respBody, err
 	}
 
 	defer newresp.Body.Close()
 	executionBody, err := ioutil.ReadAll(newresp.Body)
 	if err != nil {
 		log.Printf("[WARNING] Failed reading body for execute generated workflow: %s", err)
+		respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed unmarshalling app response. Contact support."}`))
 		resp.WriteHeader(500)
-		resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed unmarshalling app response. Contact support."}`)))
-		return
+		resp.Write(respBody)
+		return respBody, err
 	}
 
 	workflowExecution := shuffle.WorkflowExecution{}
@@ -2059,9 +2121,10 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 
 	if len(workflowExecution.ExecutionId) == 0 {
 		log.Printf("[ERROR] Failed running app %s (%s) in org %s (%s). Raw: %s", selectedApp.Name, selectedApp.ID, org.Name, org.Id, string(executionBody))
+		respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running the app. Contact support@shuffler.io if this persists."}`))
 		resp.WriteHeader(500)
-		resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed running the app. Contact support@shuffler.io if this persists."}`)))
-		return
+		resp.Write(respBody)
+		return respBody, errors.New("Failed running app")
 	}
 
 	returnBody := shuffle.HandleRetValidation(ctx, workflowExecution, len(parentWorkflow.Actions))
@@ -2081,9 +2144,10 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 	jsonParsed, err := json.Marshal(structuredFeedback)
 	if err != nil {
 		log.Printf("[ERROR] Failed marshalling structured feedback: %s", err)
+		respBody = []byte(`{"success": false, "reason": "Failed marshalling structured feedback (END)"}`)	
 		resp.WriteHeader(500)
-		resp.Write([]byte(`{"success": false, "reason": "Failed marshalling structured feedback (END)"}`))
-		return
+		resp.Write(respBody)
+		return respBody, err
 	}
 
 	if len(startNode.ID) > 0 {
@@ -2108,4 +2172,39 @@ func RunAction(ctx context.Context, user shuffle.User, value shuffle.CategoryAct
 
 	resp.WriteHeader(200)
 	resp.Write(jsonParsed)
+	return jsonParsed, nil
+}
+
+// For handling the function without changing ALL the resp.X functions
+type FakeResponseWriter struct {
+    HeaderMap    http.Header
+    Body         bytes.Buffer
+    StatusCode   int
+    WroteHeader  bool
+}
+
+func NewFakeResponseWriter() *FakeResponseWriter {
+    return &FakeResponseWriter{
+        HeaderMap:  make(http.Header),
+        StatusCode: http.StatusOK, // default status
+    }
+}
+
+func (f *FakeResponseWriter) Header() http.Header {
+    return f.HeaderMap
+}
+
+func (f *FakeResponseWriter) Write(b []byte) (int, error) {
+    if !f.WroteHeader {
+        f.WriteHeader(http.StatusOK)
+    }
+    return f.Body.Write(b)
+}
+
+func (f *FakeResponseWriter) WriteHeader(statusCode int) {
+    if f.WroteHeader {
+        return // per net/http rules, WriteHeader is a no-op if already written
+    }
+    f.StatusCode = statusCode
+    f.WroteHeader = true
 }
