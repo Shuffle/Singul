@@ -2,13 +2,14 @@ package main
 
 import (
 	"os"
-	"context"
 	//"fmt"
 	"log"
+	"context"
+	"strings"
 	"github.com/spf13/cobra"
-	"github.com/shuffle/shuffle-shared"
 
 	"singul/pkg"
+	"github.com/shuffle/shuffle-shared"
 )
 
 // Singul -> Shuffle-shared?
@@ -16,29 +17,6 @@ import (
 // Shuffle-shared -> Singul?
 func runSingul(args []string, flags map[string]string) {
 	log.Printf("Running Singul with args: %v and flags: %v\n", args, flags)
-
-	// Ensures Singul runs in "standalone mode"
-	os.Setenv("STANDALONE", "true")
-	if len(os.Getenv("FILE_LOCATION")) == 0 {
-
-		shuffleLocation := os.Getenv("SHUFFLE_FILE_LOCATION")
-		if len(shuffleLocation) > 0 {
-			os.Setenv("FILE_LOCATION", shuffleLocation)
-		} else {
-			os.Setenv("FILE_LOCATION", "./files")
-		}
-	}
-
-	// Send request to singul.io/apps/{appname}
-	// This is an API key that is public for Algolia
-	// It has restrictions per IP address as to avoid 
-	// Use the Algolia API to search for apps with the name, before asking for the public app from shuffler.io
-
-	os.Setenv("ALGOLIA_PUBLICKEY", "14bfd695f2152664bb16ca8e8c3e8281")
-	if len(os.Getenv("SHUFFLE_BACKEND")) == 0 {
-		os.Setenv("SHUFFLE_BACKEND", "https://shuffler.io")
-	}
-
 
 	ctx := context.Background()
 	value := shuffle.CategoryAction{
@@ -91,6 +69,32 @@ func rootCmdRun(cmd *cobra.Command, args []string) {
 		log.Printf("Example: singul list_tickets jira --max_tickets=10")
 		return
 	}
+
+	// Send request to singul.io/apps/{appname}
+	// This is an API key that is public for Algolia
+	// It has restrictions per IP address as to avoid 
+	// Use the Algolia API to search for apps with the name, before asking for the public app from shuffler.io
+	os.Setenv("ALGOLIA_PUBLICKEY", "14bfd695f2152664bb16ca8e8c3e8281")
+	if len(os.Getenv("SHUFFLE_BACKEND")) == 0 {
+		os.Setenv("SHUFFLE_BACKEND", "https://shuffler.io")
+	}
+
+	// Ensures Singul runs in "standalone mode"
+	os.Setenv("STANDALONE", "true")
+	if len(os.Getenv("FILE_LOCATION")) == 0 {
+
+		shuffleLocation := os.Getenv("SHUFFLE_FILE_LOCATION")
+		if len(shuffleLocation) > 0 {
+			os.Setenv("FILE_LOCATION", shuffleLocation)
+		} else {
+			os.Setenv("FILE_LOCATION", "./files")
+		}
+	}
+
+	if strings.ToLower(parsedArgs[0]) == "authenticate" {
+		singul.AuthenticateAppCli(parsedArgs[1])
+		return
+	} 
 
 	runSingul(parsedArgs, parsedFlags)
 }

@@ -1,6 +1,7 @@
 package singul
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/md5"
@@ -162,7 +163,24 @@ type outputMarshal struct {
 	Reason  string `json:"reason"`
 }
 
+func setupEnv() {
+	// Self-ran Singul versions
+	standaloneEnv := os.Getenv("STANDALONE")
+	if standaloneEnv == "true" {
+		standalone = true
+
+		filepath := os.Getenv("FILE_LOCATION")
+		if len(filepath) > 0 {
+			basepath = filepath
+		}
+
+		log.Printf("[DEBUG] Using local storage path '%s' for files", basepath)
+	}
+}
+
 func RunAction(ctx context.Context, value shuffle.CategoryAction) (string, error) {
+	setupEnv() 
+
 	resp := http.ResponseWriter(nil)
 	request := &http.Request{}
 	user := shuffle.User{}
@@ -184,20 +202,6 @@ func RunAction(ctx context.Context, value shuffle.CategoryAction) (string, error
 }
 
 func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.CategoryAction, resp http.ResponseWriter, request *http.Request) ([]byte, error) {
-
-	// Self-ran Singul versions
-	standaloneEnv := os.Getenv("STANDALONE")
-	if standaloneEnv == "true" {
-		standalone = true
-
-		filepath := os.Getenv("FILE_LOCATION")
-		if len(filepath) > 0 {
-			basepath = filepath
-		}
-
-		log.Printf("[DEBUG] Using local storage path '%s' for files", basepath)
-	}
-
 	// Ensures avoidance of nil-pointers in resp.WriteHeader()
 	if resp == nil {
 		resp = NewFakeResponseWriter() 
@@ -333,7 +337,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			return respBody, fmt.Errorf("No app name set in category action")
 		}
 
-		relevantApp, err := GetSingulApp(ctx, value.AppName)
+		relevantApp, err := GetSingulApp(value.AppName)
 		if err != nil {
 			//log.Printf("[WARNING] Failed getting app %s in category action: %s", value.AppName, err)
 			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed getting app %s"}`, value.AppName))
@@ -817,37 +821,44 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			auth, err = shuffle.GetAllWorkflowAppAuth(ctx, user.ActiveOrg.Id)
 			if err != nil {
 				log.Printf("[WARNING] Failed getting auths for org %s: %s", user.ActiveOrg.Id, err)
-			} else {
-				latestEdit := int64(0)
-				for _, auth := range auth {
-					// Check if the app name or ID is correct
-					if auth.App.Name != selectedApp.Name && auth.App.ID != selectedApp.ID {
-						continue
-					}
+			} 
+		}
 
-					// Taking whichever valid is last
-					if auth.Validation.Valid == true {
-						foundAuthenticationId = auth.Id
-						break
-					}
-
-					// Check if the auth is valid
-					if auth.Edited < latestEdit {
-						continue
-					}
-
-					foundAuthenticationId = auth.Id
-					latestEdit = auth.Edited
+		if err == nil {
+			latestEdit := int64(0)
+			for _, auth := range auth {
+				// Check if the app name or ID is correct
+				if auth.App.Name != selectedApp.Name && auth.App.ID != selectedApp.ID {
+					continue
 				}
+
+				// Taking whichever valid is last
+				if auth.Validation.Valid == true {
+					foundAuthenticationId = auth.Id
+					break
+				}
+
+				// Check if the auth is valid
+				if auth.Edited < latestEdit {
+					continue
+				}
+
+				foundAuthenticationId = auth.Id
+				latestEdit = auth.Edited
 			}
 		}
 	}
 
 	if len(foundAuthenticationId) > 0 {
 		if len(auth) == 0 {
-			auth, err = shuffle.GetAllWorkflowAppAuth(ctx, user.ActiveOrg.Id)
-			if err != nil {
-				log.Printf("[DEBUG] Failed loading auth: %s", err)
+
+			if standalone { 
+				auth, err = GetLocalAuth()
+			} else {
+				auth, err = shuffle.GetAllWorkflowAppAuth(ctx, user.ActiveOrg.Id)
+				if err != nil {
+					log.Printf("[DEBUG] Failed loading auth: %s", err)
+				}
 			}
 		}
 
@@ -997,28 +1008,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		return jsonFormatted, nil
 	}
 
-	if !value.SkipWorkflow {
+	if !standalone && !value.SkipWorkflow {
 		log.Printf("\n\n[INFO] Adding workflow %s\n\n", parentWorkflow.ID)
 	}
 
-	/*
-		refUrl := ""
-		if project.Environment == "cloud" {
-			location := "europe-west2"
-			if len(os.Getenv("SHUFFLE_GCEPROJECT_REGION")) > 0 {
-				location = os.Getenv("SHUFFLE_GCEPROJECT_REGION")
-			}
-
-			gceProject := os.Getenv("SHUFFLE_GCEPROJECT")
-			functionName := fmt.Sprintf("%s-%s", selectedApp.Name, selectedApp.ID)
-			functionName = strings.ToLower(strings.Replace(strings.Replace(strings.Replace(strings.Replace(strings.Replace(functionName, "_", "-", -1), ":", "-", -1), "-", "-", -1), " ", "-", -1), ".", "-", -1))
-
-			refUrl = fmt.Sprintf("https://%s-%s.cloudfunctions.net/%s", location, gceProject, functionName)
-		}
-	*/
-
 	// Now start connecting it to the correct app (Jira?)
-
 	label := selectedAction.Name
 	if strings.HasPrefix(label, "get_list") {
 		// Remove get_ at the start
@@ -1125,7 +1119,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	// Check if the organisation has a specific set of parameters for this action, mapped to the following fields:
 	selectedAction.AppID = selectedApp.ID
 	selectedAction.AppName = selectedApp.Name
-	selectedAction = shuffle.GetOrgspecificParameters(ctx, *org, selectedAction)
+	selectedAction = GetOrgspecificParameters(ctx, *org, selectedAction)
 
 	//log.Printf("[DEBUG] Required bodyfields: %#v", selectedAction.RequiredBodyFields)
 	handledRequiredFields := []string{}
@@ -1205,6 +1199,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	// Send request to /api/v1/conversation with this data
 	baseUrl := fmt.Sprintf("https://shuffler.io")
+	if len(os.Getenv("BASE_URL")) > 0 {
+		baseUrl = fmt.Sprintf("%s", os.Getenv("BASE_URL"))
+	}
+
 	if len(os.Getenv("SHUFFLE_CLOUDRUN_URL")) > 0 {
 		baseUrl = fmt.Sprintf("%s", os.Getenv("SHUFFLE_CLOUDRUN_URL"))
 	}
@@ -2038,47 +2036,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
-	err = shuffle.SetWorkflow(ctx, parentWorkflow, parentWorkflow.ID)
-	if err != nil {
-		log.Printf("[WARNING] Failed setting workflow during category run: %s", err)
+	if !standalone { 
+		err = shuffle.SetWorkflow(ctx, parentWorkflow, parentWorkflow.ID)
+		if err != nil {
+			log.Printf("[WARNING] Failed setting workflow during category run: %s", err)
+		}
 	}
 
-	/*
-		workflowBytes, err := json.Marshal(parentWorkflow)
-		if err != nil {
-			log.Printf("[WARNING] Failed marshal of workflow during cache setting: %s", err)
-			resp.WriteHeader(400)
-			resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed packing workflow. Please try again and contact support if this persists."}`)))
-			return
-		}
-
-		// Force it to ONLY be in cache? Means it times out.
-		err = SetCache(ctx, fmt.Sprintf("workflow_%s", parentWorkflow.ID), workflowBytes, 10)
-		if err != nil {
-			log.Printf("[WARNING] Failed setting cache for workflow during category run: %s", err)
-
-			shuffle.SetWorkflow(ctx, parentWorkflow, parentWorkflow.ID)
-		}
-	*/
-
 	log.Printf("[DEBUG] Done preparing workflow '%s' (%s) to be ran for category action %s", parentWorkflow.Name, parentWorkflow.ID, selectedAction.Name)
-
-	/*
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-	 */
 
 	if value.DryRun {
 		log.Printf("\n\n[DEBUG] Returning before execution because dry run is set\n\n")
@@ -2124,17 +2089,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	}
 
 	// Starting execution
-	/*
-		baseUrl := fmt.Sprintf("https://shuffler.io")
-		if len(os.Getenv("SHUFFLE_GCEPROJECT")) > 0 && len(os.Getenv("SHUFFLE_GCEPROJECT_LOCATION")) > 0 {
-			baseUrl = fmt.Sprintf("https://%s.%s.r.appspot.com", os.Getenv("SHUFFLE_GCEPROJECT"), os.Getenv("SHUFFLE_GCEPROJECT_LOCATION"))
-		}
-
-		if len(os.Getenv("SHUFFLE_CLOUDRUN_URL")) > 0 {
-			baseUrl = fmt.Sprintf("%s", os.Getenv("SHUFFLE_CLOUDRUN_URL"))
-		}
-	*/
-
 	workflowRunUrl := fmt.Sprintf("%s/api/v1/workflows/%s/execute", baseUrl, parentWorkflow.ID)
 	req, err := http.NewRequest(
 		"POST",
@@ -2229,6 +2183,71 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	resp.WriteHeader(200)
 	resp.Write(jsonParsed)
 	return jsonParsed, nil
+}
+
+
+func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuffle.WorkflowAppAction) shuffle.WorkflowAppAction {
+	log.Printf("\n\n\n\n")
+	for paramIndex, param := range action.Parameters {
+		if param.Configuration {
+			continue
+		}
+
+		if len(param.Options) > 0 {
+			continue
+		}
+
+		fileId := fmt.Sprintf("file_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(action.Name), " ", "_", -1), strings.ToLower(param.Name))
+
+		if standalone { 
+			// Look for the file and read it locally
+			fullPath := fmt.Sprintf("%s/action_parameters/%s", basepath, fileId)
+			fileinfo, err := os.Open(fullPath)
+			if err != nil {
+				continue
+			}
+
+			defer fileinfo.Close()
+			content, err := ioutil.ReadAll(fileinfo)
+			if err != nil {
+				continue
+			}
+
+			if len(content) > 5 {
+				action.Parameters[paramIndex].Example = string(content)
+			}
+
+			continue
+		} 
+
+		file, err := shuffle.GetFile(ctx, fileId)
+		if err != nil || file.Status != "active" {
+			//log.Printf("[WARNING] File %s NOT found or not active. Status: %#v", fileId, file.Status)
+			continue
+		}
+
+		if file.OrgId != org.Id {
+			file.OrgId = org.Id
+		}
+
+		// make a fake resp to get the content
+		//func GetFileContent(ctx context.Context, file *File, resp http.ResponseWriter) ([]byte, error) {
+		content, err := shuffle.GetFileContent(ctx, file, nil)
+		if err != nil {
+			continue
+		}
+
+		if len(content) < 5 {
+			continue
+		}
+
+		// log.Printf("[DEBUG] content it got and is putting into example: %s - %d", string(content), paramIndex)
+
+		//log.Printf("[INFO] Found content for file %s for action %s in app %s. Should set param.", fileId, action.Name, action.AppName)
+		action.Parameters[paramIndex].Example = string(content)
+	}
+
+	return action
 }
 
 func GetActionFromLabel(ctx context.Context, app shuffle.WorkflowApp, label string, fixLabels bool, fields []shuffle.Valuereplace, count int) (shuffle.WorkflowAppAction, shuffle.AppCategory, []string) {
@@ -2334,11 +2353,132 @@ func GetActionFromLabel(ctx context.Context, app shuffle.WorkflowApp, label stri
 
 func GetLocalAuth() ([]shuffle.AppAuthenticationStorage, error) {
 	allAuth := []shuffle.AppAuthenticationStorage{}
+	// Look for all files 
+	filePath := fmt.Sprintf("%s/auth", basepath)
+	files, err := os.ReadDir(filePath)
+	if err != nil {
+		log.Printf("[ERROR] Failed reading auth directory: %s", err)
+		return allAuth, err
+	}
+
+	for _, file := range files {
+		filename := file.Name()
+		if !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+
+		filePath := fmt.Sprintf("%s/auth/%s", basepath, filename)
+		file, err := os.Open(filePath)
+		if err != nil {
+			log.Printf("[ERROR] Failed opening auth file: %s", err)
+			continue
+		}
+
+		defer file.Close()
+		filedata, err := os.ReadFile(filePath)
+		if err != nil {
+			log.Printf("[ERROR] Error reading file: %s", err)
+			continue
+		}
+
+		// Unmarshal the file data into the AppAuthenticationStorage struct
+		newAuth := shuffle.AppAuthenticationStorage{}
+		err = json.Unmarshal(filedata, &newAuth)
+		if err != nil {
+			log.Printf("[ERROR] Error unmarshalling file: %s", err)
+			continue
+		}
+
+		allAuth = append(allAuth, newAuth)
+	}
 
 	return allAuth, nil
 }
 
-func GetSingulApp(ctx context.Context, appname string) (shuffle.WorkflowApp, error) {
+func AuthenticateAppCli(appname string) error {
+	setupEnv()
+
+	app, err := GetSingulApp(appname) 
+	if err != nil {
+		log.Printf("[ERROR] Failed getting app %s: %s", appname, err)
+		return err
+	}
+
+	if len(app.Authentication.Parameters) == 0 {
+		log.Printf("[DEBUG] No authentication fields found for app %s", appname)
+		return errors.New("No authentication fields found")
+	}
+
+	//log.Printf("[DEBUG] Authentication fields: %#v", app.Authentication.Parameters)
+
+	authId := uuid.NewV4().String()
+	newAuthenticationStorage := shuffle.AppAuthenticationStorage{
+		Id: authId,
+		App: app,
+
+		Label: "Authentication for " + appname,
+		Active: true, 
+		Created: time.Now().Unix(),
+		Edited: time.Now().Unix(),
+
+		// FIXME: This may need work.
+		Encrypted: false,
+	}
+
+	log.Printf("[DEBUG] Input your fields for authentication for app %s", appname)
+	for _, param := range app.Authentication.Parameters {
+		//log.Printf("[DEBUG] Found parameter %s: %s", param.Name, param.Value)
+
+		// Scanf to get input for each field
+		scan := bufio.NewScanner(os.Stdin)
+		fmt.Printf("Enter value for %s (%s): ", param.Name, param.Value)
+		scan.Scan()
+
+		input := scan.Text()
+		if len(input) == 0 {
+			if len(param.Value) > 0 {
+				input = param.Value
+			} else {
+				input = " "
+				//if param.Required { 
+				//return errors.New(fmt.Sprintf("No input provided for %s", param.Name))
+				//}
+			}
+		}
+
+		field := shuffle.AuthenticationStore{
+			Key:  param.Name,
+			Value: input,
+		}
+
+		newAuthenticationStorage.Fields = append(newAuthenticationStorage.Fields, field)
+	}
+
+	// Generate a uuid for the authentication
+	// Then write it to file.json with that name 
+	marshalledAuth, err := json.MarshalIndent(newAuthenticationStorage, "", "  ")
+	if err != nil {
+		log.Printf("[ERROR] Failed marshalling authentication storage: %s", err)
+		return err
+	}
+
+	// Write the authentication storage to file
+	authPath := fmt.Sprintf("%s/auth/%s.json", basepath, app.ID)
+	err = os.MkdirAll(fmt.Sprintf("%s/auth", basepath), os.ModePerm)
+	if err != nil {
+		log.Printf("[ERROR] Failed creating auth directory: %s", err)
+	}
+
+	err = os.WriteFile(authPath, marshalledAuth, 0644)
+	if err != nil {
+		log.Printf("[ERROR] Failed writing authentication storage to file: %s", err)
+		return err
+	}
+
+	return nil
+}
+
+func GetSingulApp(appname string) (shuffle.WorkflowApp, error) {
 	if len(appname) == 0 {
 		return shuffle.WorkflowApp{}, errors.New("Appname not set")
 	}
