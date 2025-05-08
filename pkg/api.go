@@ -16,11 +16,14 @@ import (
 	"time"
 
 	uuid "github.com/satori/go.uuid"
+	"github.com/algolia/algoliasearch-client-go/v3/algolia/search"
+
 
 	"github.com/frikky/schemaless"
 	"github.com/shuffle/shuffle-shared"
 )
 
+var standalone = false
 var debug = os.Getenv("DEBUG") == "true"
 var basepath = os.Getenv("SHUFFLE_FILE_LOCATION")
 
@@ -181,6 +184,20 @@ func RunAction(ctx context.Context, value shuffle.CategoryAction) (string, error
 }
 
 func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.CategoryAction, resp http.ResponseWriter, request *http.Request) ([]byte, error) {
+
+	// Self-ran Singul versions
+	standaloneEnv := os.Getenv("STANDALONE")
+	if standaloneEnv == "true" {
+		standalone = true
+
+		filepath := os.Getenv("FILE_LOCATION")
+		if len(filepath) > 0 {
+			basepath = filepath
+		}
+
+		log.Printf("[DEBUG] Using local storage path '%s' for files", basepath)
+	}
+
 	// Ensures avoidance of nil-pointers in resp.WriteHeader()
 	if resp == nil {
 		resp = NewFakeResponseWriter() 
@@ -202,7 +219,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		return respBody, fmt.Errorf("No label set in category action")
 	}
 
-	log.Printf("[INFO] Running category-action '%s' in category '%s' with app %s for org %s (%s)", value.Label, value.Category, value.AppName, user.ActiveOrg.Name, user.ActiveOrg.Id)
+	//log.Printf("[INFO] Running category-action '%s' in category '%s' with app %s for org %s (%s)", value.Label, value.Category, value.AppName, user.ActiveOrg.Name, user.ActiveOrg.Id)
 
 	if len(value.Query) > 0 {
 		// Check if app authentication. If so, check if intent is to actually authenticate, or find the actual intent
@@ -289,18 +306,43 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	log.Printf("[INFO] Found label '%s' in category '%s'. Indexes for category: %d, and label: %d", value.Label, value.Category, foundIndex, labelIndex)
 
-	newapps, err := shuffle.GetPrioritizedApps(ctx, user)
-	if err != nil {
-		log.Printf("[WARNING] Failed getting apps in category action: %s", err)
-		respBody = []byte(`{"success": false, "reason": "Failed loading apps. Contact support@shuffler.io"}`)
-		resp.WriteHeader(500)
-		resp.Write(respBody)
-		return respBody, err
-	}
+	var err error
+	org := &shuffle.Org{}
+	newapps := []shuffle.WorkflowApp{}
+	if !standalone { 
+		newapps, err = shuffle.GetPrioritizedApps(ctx, user)
+		if err != nil {
+			log.Printf("[WARNING] Failed getting apps in category action: %s", err)
+			respBody = []byte(`{"success": false, "reason": "Failed loading apps. Contact support@shuffler.io"}`)
+			resp.WriteHeader(500)
+			resp.Write(respBody)
+			return respBody, err
+		}
 
-	org, err := shuffle.GetOrg(ctx, user.ActiveOrg.Id)
-	if err != nil {
-		log.Printf("[ERROR] Failed getting org %s (%s) in category action: %s", user.ActiveOrg.Name, user.ActiveOrg.Id, err)
+		org, err = shuffle.GetOrg(ctx, user.ActiveOrg.Id)
+		if err != nil {
+			log.Printf("[ERROR] Failed getting org %s (%s) in category action: %s", user.ActiveOrg.Name, user.ActiveOrg.Id, err)
+		}
+	} else {
+		//log.Printf("[INFO] Standalone mode. Loading details for app %s", value.AppName)
+
+		if len(value.AppName) == 0 {
+			respBody = []byte(`{"success": false, "reason": "Provide an app name in the request"}`)
+			resp.WriteHeader(400)
+			resp.Write(respBody)
+			return respBody, fmt.Errorf("No app name set in category action")
+		}
+
+		relevantApp, err := GetSingulApp(ctx, value.AppName)
+		if err != nil {
+			//log.Printf("[WARNING] Failed getting app %s in category action: %s", value.AppName, err)
+			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed getting app %s"}`, value.AppName))
+			resp.WriteHeader(400)
+			resp.Write(respBody)
+			return respBody, err
+		}
+
+		newapps = append(newapps, relevantApp)
 	}
 
 	if value.Category == "email" {
@@ -435,7 +477,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				selectedApp = app
 				log.Printf("[DEBUG] Found app - checking label: %s vs %s (%s)", app.Name, value.AppName, app.ID)
 				//selectedAction, selectedCategory, availableLabels = shuffle.GetActionFromLabel(ctx, selectedApp, value.Label, true)
-				selectedAction, selectedCategory, availableLabels = shuffle.GetActionFromLabel(ctx, app, value.Label, true, value.Fields, 0)
+				selectedAction, selectedCategory, availableLabels = GetActionFromLabel(ctx, app, value.Label, true, value.Fields, 0)
 				partialMatch = false
 
 				break
@@ -445,7 +487,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				selectedApp = app
 
 				log.Printf("[WARNING] Set selected app to PARTIAL match %s (%s) for input %s", selectedApp.Name, selectedApp.ID, value.AppName)
-				selectedAction, selectedCategory, availableLabels = shuffle.GetActionFromLabel(ctx, app, value.Label, true, value.Fields, 0)
+				selectedAction, selectedCategory, availableLabels = GetActionFromLabel(ctx, app, value.Label, true, value.Fields, 0)
 
 				partialMatch = true
 			}
@@ -465,13 +507,16 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			} else if err == nil && len(foundApp.ObjectID) > 0 {
 				log.Printf("[INFO] Found app %s (%s) for name %s in Algolia", foundApp.Name, foundApp.ObjectID, value.AppName)
 
-				tmpApp, err := shuffle.GetApp(ctx, foundApp.ObjectID, user, false)
-				if err == nil {
-					selectedApp = *tmpApp
-					failed = false
+				if !standalone {
+					tmpApp, err := shuffle.GetApp(ctx, foundApp.ObjectID, user, false)
 
-					//log.Printf("[DEBUG] Got app %s with %d actions", selectedApp.Name, len(selectedApp.Actions))
-					selectedAction, selectedCategory, availableLabels = shuffle.GetActionFromLabel(ctx, selectedApp, value.Label, true, value.Fields, 0)
+					if err == nil {
+						selectedApp = *tmpApp
+						failed = false
+
+						//log.Printf("[DEBUG] Got app %s with %d actions", selectedApp.Name, len(selectedApp.Actions))
+						selectedAction, selectedCategory, availableLabels = GetActionFromLabel(ctx, selectedApp, value.Label, true, value.Fields, 0)
+					}
 				}
 			} else {
 				log.Printf("[DEBUG] Found app with ID or name '%s' in Algolia: %#v", value.AppName, foundApp)
@@ -727,28 +772,30 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	}
 
 	// Get the environments for the user and choose the default
-	environments, err := shuffle.GetEnvironments(ctx, user.ActiveOrg.Id)
-	if err == nil {
-		defaultEnv := ""
+	if !standalone { 
+		environments, err := shuffle.GetEnvironments(ctx, user.ActiveOrg.Id)
+		if err == nil {
+			defaultEnv := ""
 
-		foundEnv := strings.TrimSpace(strings.ToLower(value.Environment))
-		for _, env := range environments {
-			if env.Archived {
-				continue
+			foundEnv := strings.TrimSpace(strings.ToLower(value.Environment))
+			for _, env := range environments {
+				if env.Archived {
+					continue
+				}
+
+				if env.Default {
+					defaultEnv = env.Name
+				}
+
+				envName := strings.TrimSpace(strings.ToLower(env.Name))
+				if len(value.Environment) > 0 && envName == foundEnv {
+					environment = env.Name
+				}
 			}
 
-			if env.Default {
-				defaultEnv = env.Name
+			if len(environment) == 0 && len(defaultEnv) > 0 {
+				environment = defaultEnv
 			}
-
-			envName := strings.TrimSpace(strings.ToLower(env.Name))
-			if len(value.Environment) > 0 && envName == foundEnv {
-				environment = env.Name
-			}
-		}
-
-		if len(environment) == 0 && len(defaultEnv) > 0 {
-			environment = defaultEnv
 		}
 	}
 
@@ -759,30 +806,39 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		// 2. Append the auth
 		// 3. Run!
 
-		auth, err = shuffle.GetAllWorkflowAppAuth(ctx, user.ActiveOrg.Id)
-		if err != nil {
-			log.Printf("[WARNING] Failed getting auths for org %s: %s", user.ActiveOrg.Id, err)
+		if standalone { 
+			log.Printf("\n\nLoad local auth\n\n")
+			auth, err = GetLocalAuth()
+			if err != nil {
+				log.Printf("[WARNING] Failed getting local auth: %s", err)
+			}
+
 		} else {
-			latestEdit := int64(0)
-			for _, auth := range auth {
-				// Check if the app name or ID is correct
-				if auth.App.Name != selectedApp.Name && auth.App.ID != selectedApp.ID {
-					continue
-				}
+			auth, err = shuffle.GetAllWorkflowAppAuth(ctx, user.ActiveOrg.Id)
+			if err != nil {
+				log.Printf("[WARNING] Failed getting auths for org %s: %s", user.ActiveOrg.Id, err)
+			} else {
+				latestEdit := int64(0)
+				for _, auth := range auth {
+					// Check if the app name or ID is correct
+					if auth.App.Name != selectedApp.Name && auth.App.ID != selectedApp.ID {
+						continue
+					}
 
-				// Taking whichever valid is last
-				if auth.Validation.Valid == true {
+					// Taking whichever valid is last
+					if auth.Validation.Valid == true {
+						foundAuthenticationId = auth.Id
+						break
+					}
+
+					// Check if the auth is valid
+					if auth.Edited < latestEdit {
+						continue
+					}
+
 					foundAuthenticationId = auth.Id
-					break
+					latestEdit = auth.Edited
 				}
-
-				// Check if the auth is valid
-				if auth.Edited < latestEdit {
-					continue
-				}
-
-				foundAuthenticationId = auth.Id
-				latestEdit = auth.Edited
 			}
 		}
 	}
@@ -2173,6 +2229,259 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	resp.WriteHeader(200)
 	resp.Write(jsonParsed)
 	return jsonParsed, nil
+}
+
+func GetActionFromLabel(ctx context.Context, app shuffle.WorkflowApp, label string, fixLabels bool, fields []shuffle.Valuereplace, count int) (shuffle.WorkflowAppAction, shuffle.AppCategory, []string) {
+	availableLabels := []string{}
+	selectedCategory := shuffle.AppCategory{}
+	selectedAction := shuffle.WorkflowAppAction{}
+
+	if len(app.ID) == 0 || len(app.Actions) == 0 {
+		log.Printf("[WARNING] No actions in app %s (%s) for label '%s'", app.Name, app.ID, label)
+		return selectedAction, selectedCategory, availableLabels
+	}
+
+	// Reload the app to be the proper one with updated actions instead
+	// of random cache issues
+	if !standalone {
+		newApp, err := shuffle.GetApp(ctx, app.ID, shuffle.User{}, false)
+		if err != nil {
+			log.Printf("[WARNING] Failed getting app in category action: %s", err)
+		} else {
+			app = *newApp
+		}
+	}
+
+	categories := shuffle.GetAllAppCategories()
+	lowercaseLabel := strings.ReplaceAll(strings.ToLower(label), " ", "_")
+	exactMatch := false
+	for _, action := range app.Actions {
+		if len(action.CategoryLabel) == 0 {
+			//log.Printf("%s: %#v\n", action.Name, action.CategoryLabel)
+			continue
+		}
+
+		//log.Printf("FOUND LABELS: %s -> %#v\n", action.Name, action.CategoryLabel)
+
+		for _, label := range action.CategoryLabel {
+			newLabel := strings.ReplaceAll(strings.ToLower(label), " ", "_")
+			if newLabel == "no_label" {
+				continue
+			}
+
+			// To ensure we have both normal + parsed label
+			availableLabels = append(availableLabels, newLabel)
+			availableLabels = append(availableLabels, label)
+
+			if newLabel == lowercaseLabel || strings.HasPrefix(newLabel, lowercaseLabel) {
+				//log.Printf("[DEBUG] Found action for label '%s' in app %s (%s): %s", label, app.Name, app.ID, action.Name)
+				selectedAction = action
+
+				for _, category := range categories {
+					if strings.ToLower(category.Name) == strings.ToLower(app.Categories[0]) {
+						selectedCategory = category
+						break
+					}
+				}
+
+				if newLabel == lowercaseLabel {
+					exactMatch = true
+					break
+				}
+			}
+		}
+
+		if len(selectedAction.ID) > 0 && exactMatch {
+			break
+		}
+	}
+
+	// Decides if we are to autocomplete the app if labels are not found
+	if len(selectedAction.ID) == 0 {
+		if fixLabels == true {
+			//log.Printf("\n\n[DEBUG] Action not found in app %s (%s) for label '%s'. Autodiscovering and updating the app!!!\n\n", app.Name, app.ID, label)
+
+			keys := []string{}
+			for _, field := range fields {
+				keys = append(keys, field.Key)
+			}
+
+			//log.Printf("[DEBUG] Calling AutofixAppLabels")
+
+			// Make it FORCE look for a specific label if it exists, otherwise
+			newApp, guessedAction := shuffle.AutofixAppLabels(app, label, keys)
+
+			// print the found action parameters
+			//for _, param := range guessedAction.Parameters {
+			//	log.Printf("[DEBUG] Found parameter %s: %s", param.Name, param.Value)
+			//}
+
+			if guessedAction.Name != "" {
+				log.Printf("[DEBUG] Found action for label '%s' in app %s (%s): %s", label, newApp.Name, newApp.ID, guessedAction.Name)
+				selectedAction = guessedAction
+			} else {
+				if count > 5 {
+					log.Printf("[WARNING] Too many attempts to find action for label '%s' in app %s (%s)", label, newApp.Name, newApp.ID)
+				} else {
+					return GetActionFromLabel(ctx, newApp, label, false, fields, count+1)
+				}
+			}
+		}
+	}
+
+	return selectedAction, selectedCategory, availableLabels
+}
+
+func GetLocalAuth() ([]shuffle.AppAuthenticationStorage, error) {
+	allAuth := []shuffle.AppAuthenticationStorage{}
+
+	return allAuth, nil
+}
+
+func GetSingulApp(ctx context.Context, appname string) (shuffle.WorkflowApp, error) {
+	if len(appname) == 0 {
+		return shuffle.WorkflowApp{}, errors.New("Appname not set")
+	}
+
+	// Look for the file basepath/apps/appname.json
+
+	searchname := strings.ReplaceAll(strings.ToLower(appname), " ", "_")
+	appPath := fmt.Sprintf("%s/apps/%s.json", basepath, searchname)
+
+	var err error
+	responseBody := []byte{}
+
+	_, statErr := os.Stat(appPath) 
+	if statErr == nil {
+		// File exists, read it
+		file, err := os.Open(appPath)
+		if err != nil {
+			return shuffle.WorkflowApp{}, err
+		}
+
+		defer file.Close()
+		responseBody, err = os.ReadFile(appPath)
+		if err != nil {
+			log.Printf("[ERROR] Error reading file: %s", err)
+			return shuffle.WorkflowApp{}, err
+		}
+	} else {
+		algoliaPublicKey := os.Getenv("ALGOLIA_PUBLICKEY")
+		if len(algoliaPublicKey) == 0 {
+			return shuffle.WorkflowApp{}, errors.New("Algolia public key not set")
+		}
+
+		algoliaAppId := "JNSS5CFDZZ"
+		algoliaclient := search.NewClient(algoliaAppId, algoliaPublicKey)
+
+		index := algoliaclient.InitIndex("appsearch")
+		res, err := index.Search(appname)
+		if err != nil {
+			log.Printf("[ERROR] Error searching for app in Algolia index: %s", err)
+			return shuffle.WorkflowApp{}, err
+		}
+
+		appId := ""
+		for _, hit := range res.Hits {
+			if name, ok := hit["appname"]; ok {
+				if !strings.Contains(strings.ToLower(name.(string)), searchname) {
+					continue
+				}
+			}
+
+			if val, ok := hit["objectID"]; ok {
+				appId = val.(string)
+				break
+			} else {
+				log.Printf("[ERROR] App not found in Algolia index: %s", appname)
+			}
+		}
+
+		if appId == "" {
+			log.Printf("[ERROR] App not found in Algolia index: %s", appname)
+			return shuffle.WorkflowApp{}, errors.New("App not found")
+		}
+
+		//url := fmt.Sprintf("https://singul.io/apps/%s", appname)
+		baseUrl := "https://shuffler.io/api/v1"
+		url := fmt.Sprintf("%s/apps/%s/config", baseUrl, appId)
+		req, err := http.NewRequest(
+			"GET", 
+			url, 
+			nil,
+		)
+
+		if err != nil {
+			log.Printf("[ERROR] Error in new request for singul app: %s", err)
+			return shuffle.WorkflowApp{}, err
+		}
+
+		client := &http.Client{}
+		newresp, err := client.Do(req)
+		if err != nil {
+			log.Printf("[ERROR] Error running request for singul app: %s. URL: %s", err, url)
+			return shuffle.WorkflowApp{}, err
+		}
+
+		if newresp.StatusCode != 200 {
+			log.Printf("[ERROR] Bad status code for app: %s. URL: %s", newresp.Status, url)
+			return shuffle.WorkflowApp{}, errors.New("Failed getting app details from backend. Please try again. Appnames may be case sensitive.")
+		}
+
+		defer newresp.Body.Close()
+		responseBody, err = ioutil.ReadAll(newresp.Body)
+		if err != nil {
+			log.Printf("[ERROR] Failed reading body for singul app: %s", err)
+			return shuffle.WorkflowApp{}, err
+		}
+	}
+
+	// Unmarshal responseBody back to
+	newApp := shuffle.AppParser{}
+	err = json.Unmarshal(responseBody, &newApp)
+	if err != nil {
+		log.Printf("[WARNING] Failed unmarshalling body for singul app: %s %+v", err, string(responseBody))
+		return shuffle.WorkflowApp{}, err
+	}
+
+	if !newApp.Success {
+		return shuffle.WorkflowApp{}, errors.New("Failed getting app details from backend. Please try again. Appnames may be case sensitive.")
+	}
+
+	if len(newApp.App) == 0 {
+		return shuffle.WorkflowApp{}, errors.New("Failed finding app for this ID")
+	}
+
+	// Unmarshal the newApp.App into workflowApp
+	parsedApp := shuffle.WorkflowApp{}
+	err = json.Unmarshal(newApp.App, &parsedApp)
+	if err != nil {
+		log.Printf("[WARNING] Failed unmarshalling app: %s", err)
+		return parsedApp, err
+	}
+
+	if len(parsedApp.ID) == 0 {
+		log.Printf("[WARNING] Failed finding app for this ID")
+		return parsedApp, errors.New("Failed finding app for this ID")
+	}
+
+	if statErr != nil {
+		err = os.MkdirAll(fmt.Sprintf("%s/apps", basepath), os.ModePerm)
+		if err != nil {
+			log.Printf("[ERROR] Error creating directory: %s", err)
+			return parsedApp, err
+		}
+
+		err = os.WriteFile(appPath, responseBody, 0644)
+		if err != nil {
+			log.Printf("[ERROR] Error writing file: %s", err)
+			return parsedApp, err
+		} else {
+			log.Printf("[DEBUG] Wrote app to file: %s", appPath)
+		}
+	}
+
+	return parsedApp, nil
 }
 
 // For handling the function without changing ALL the resp.X functions

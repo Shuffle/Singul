@@ -28,7 +28,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.1 // indirect
 	github.com/ProtonMail/go-crypto v1.1.3 // indirect
 	github.com/adrg/strutil v0.2.3 // indirect
-	github.com/algolia/algoliasearch-client-go/v3 v3.18.1 // indirect
+	github.com/algolia/algoliasearch-client-go/v3 v3.31.4 // indirect
 	github.com/bradfitz/gomemcache v0.0.0-20230905024940-24af94b03874 // indirect
 	github.com/bradfitz/slice v0.0.0-20180809154707-2b758aa73013 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect

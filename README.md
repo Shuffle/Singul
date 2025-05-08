@@ -6,11 +6,11 @@ Singul
 
 </h1>
 <h4 align="center">
-Connect to anything with a Singul line of code. Now open source 
+Connect to anything with a Singul line of code. Now open source!
 </h4>
 
 ## Why
-APIs and AI Agents should be easier to use and build. Singul solves both by being deterministic and reliable.
+APIs and AI Agents should be easier to use and build. Singul solves both by being deterministic, controllable and reliable.
 
 **Deterministic because:**
 - LLMs can be unpredictable and unreliable
