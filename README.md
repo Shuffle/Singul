@@ -26,8 +26,8 @@ APIs and AI Agents should be easier to use and build. Singul solves both by bein
 CLI
 ```
 singul --help
-singul jira list_tickets 
-singul outlook send_mail --subject="hoy"
+singul list_tickets jira 
+singul send_mail outlook --subject="hoy"
 ```
 
 Code (python)
