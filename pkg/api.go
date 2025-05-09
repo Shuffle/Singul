@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/frikky/schemaless"
 	"github.com/shuffle/shuffle-shared"
+	"github.com/frikky/kin-openapi/openapi3"
 )
 
 var standalone = false
@@ -160,6 +163,7 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 
 type outputMarshal struct {
 	Success bool `json:"success"`
+	Exception string `json:"exception"`
 	Reason  string `json:"reason"`
 }
 
@@ -178,7 +182,12 @@ func setupEnv() {
 	}
 }
 
-func RunAction(ctx context.Context, value shuffle.CategoryAction) (string, error) {
+func RunAction(ctx context.Context, value shuffle.CategoryAction, retries ...int) (string, error) {
+	retriesCount := 0
+	if len(retries) > 0 {
+		retriesCount = retries[0]
+	}
+
 	setupEnv() 
 
 	resp := http.ResponseWriter(nil)
@@ -186,16 +195,33 @@ func RunAction(ctx context.Context, value shuffle.CategoryAction) (string, error
 	user := shuffle.User{}
 
 	foundResponse, err := RunActionWrapper(ctx, user, value, resp, request)
-
 	if strings.Contains(string(foundResponse), `success": false`) {
 		outputString := outputMarshal{}
-
 		jsonerr := json.Unmarshal(foundResponse, &outputString)
 		if jsonerr != nil {
 			log.Printf("[WARNING] Error with unmarshaling output in run action: %s", jsonerr)
+			return string(foundResponse), jsonerr
 		}
 
-		return outputString.Reason, err
+		if retriesCount == 0 && strings.Contains(outputString.Reason, "Authenticate") && strings.Contains(outputString.Reason, "first") {
+			appsplit := strings.Split(outputString.Reason, " ")
+			if len(appsplit) > 2 {
+				err := AuthenticateAppCli(appsplit[1])
+				if err != nil {
+					return string(foundResponse), err
+				} else {
+					return RunAction(ctx, value, 1)
+				}
+			}
+		}
+
+		reMarshalled, err := json.MarshalIndent(outputString, "", "  ")
+		if err != nil {
+			log.Printf("[WARNING] Error with marshaling output in run action: %s", err)
+			return string(foundResponse), err
+		}
+
+		return string(reMarshalled), err
 	}
 
 	return string(foundResponse), err
@@ -811,7 +837,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		// 3. Run!
 
 		if standalone { 
-			log.Printf("\n\nLoad local auth\n\n")
 			auth, err = GetLocalAuth()
 			if err != nil {
 				log.Printf("[WARNING] Failed getting local auth: %s", err)
@@ -1500,8 +1525,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
+	// Runs individual apps, one at a time
 	if value.SkipWorkflow {
-		//log.Printf("[DEBUG] Skipping workflow generation, and instead attempting to directly run the action. This is only applicable IF the action is atomic (skip_workflow=true).")
+
 		if len(missingFields) > 0 {
 			log.Printf("[WARNING] Not all required fields were found in category action. Want: %#v in action %s", missingFields, selectedAction.Name)
 			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Not all required fields are set", "label": "%s", "missing_fields": "%s", "action": "%s", "api_debugger_url": "%s"}`, value.Label, strings.Join(missingFields, ","), selectedAction.Name, fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID)))
@@ -1533,9 +1559,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			return respBody, err
 		}
 
-		// FIXME: Delete disabled for now (April 2nd 2024)
 		// This is due to needing debug capabilities
-		if len(request.Header.Get("Authorization")) > 0 {
+
+		if !standalone && len(request.Header.Get("Authorization")) > 0 {
 			tmpAuth := request.Header.Get("Authorization")
 
 			if strings.HasPrefix(tmpAuth, "Bearer") {
@@ -1549,7 +1575,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		shouldDelete := "false"
 		apprunUrl := fmt.Sprintf("%s/api/v1/apps/%s/run?delete=%s", baseUrl, secondAction.AppID, shouldDelete)
 
-		if len(request.Header.Get("Authorization")) == 0 && len(request.URL.Query().Get("execution_id")) > 0 && len(request.URL.Query().Get("authorization")) > 0 {
+		if !standalone && len(request.Header.Get("Authorization")) == 0 && len(request.URL.Query().Get("execution_id")) > 0 && len(request.URL.Query().Get("authorization")) > 0 {
 			apprunUrl = fmt.Sprintf("%s&execution_id=%s&authorization=%s", apprunUrl, request.URL.Query().Get("execution_id"), request.URL.Query().Get("authorization"))
 
 			authorization = request.URL.Query().Get("authorization")
@@ -1574,75 +1600,96 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		log.Printf("[DEBUG][AI] Sending single API run execution to %s", apprunUrl)
 		for i := 0; i < maxAttempts; i++ {
 
-			// Sends back how many translations happened
-			// -url is just for the app to parse it :(
-			attemptString := "x-translation-attempt-url"
-			if _, ok := resp.Header()[attemptString]; ok {
-				resp.Header().Set(attemptString, fmt.Sprintf("%d", i+1))
-			} else {
-				resp.Header().Add(attemptString, fmt.Sprintf("%d", i+1))
-			}
-
-			//log.Printf("[DEBUG] Attempt preparedAction: %s", string(preparedAction))
-
 			// The request that goes to the CORRECT app
-			req, err := http.NewRequest(
-				"POST",
-				apprunUrl,
-				bytes.NewBuffer(preparedAction),
-			)
-
-			if err != nil {
-				log.Printf("[WARNING] Error in new request for execute generated app run: %s", err)
-				respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed preparing new request. Contact support."}`))
-				resp.WriteHeader(500)
-				resp.Write(respBody)
-				return respBody, err
-			}
-
-			for key, value := range request.Header {
-				if len(value) == 0 {
-					continue
+			apprunBody := []byte{}
+			if standalone { 
+				unmarshalledAction := shuffle.Action{}
+				err = json.Unmarshal(preparedAction, &unmarshalledAction)
+				if err != nil {
+					log.Printf("[ERROR] Failed unmarshalling action in category run for app %s: %s", secondAction.AppID, err)
 				}
 
-				req.Header.Add(key, value[0])
-			}
+				parentWorkflow.Actions = []shuffle.Action{
+					unmarshalledAction,
+				}
 
-			newresp, err := client.Do(req)
-			if err != nil {
-				log.Printf("[WARNING] Error running body for execute generated app run: %s", err)
-				respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running generated app. Contact support."}`))
-				resp.WriteHeader(500)
-				resp.Write(respBody)
-				return respBody, err
-			}
+				apprunBody, err = handleStandaloneExecution(parentWorkflow)
+				if err != nil {
+					log.Printf("[ERROR] Failed running standalone execution: %s", err)
+				}
+			} else {
+				// Sends back how many translations happened
+				// -url is just for the app to parse it :(
+				attemptString := "x-translation-attempt-url"
+				if _, ok := resp.Header()[attemptString]; ok {
+					resp.Header().Set(attemptString, fmt.Sprintf("%d", i+1))
+				} else {
+					resp.Header().Add(attemptString, fmt.Sprintf("%d", i+1))
+				}
 
-			// Ensures frontend has something to debug if things go wrong
-			for key, value := range newresp.Header {
-				if strings.HasSuffix(strings.ToLower(key), "-url") {
+				//log.Printf("[DEBUG] Attempt preparedAction: %s", string(preparedAction))
 
-					// Remove old ones with the same key
-					if _, ok := resp.Header()[key]; ok {
-						resp.Header().Set(key, value[0])
-					} else {
-						resp.Header().Add(key, value[0])
+				req, err := http.NewRequest(
+					"POST",
+					apprunUrl,
+					bytes.NewBuffer(preparedAction),
+				)
+
+				if err != nil {
+					log.Printf("[WARNING] Error in new request for execute generated app run: %s", err)
+					respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed preparing new request. Contact support."}`))
+					resp.WriteHeader(500)
+					resp.Write(respBody)
+					return respBody, err
+				}
+
+				for key, value := range request.Header {
+					if len(value) == 0 {
+						continue
+					}
+
+					req.Header.Add(key, value[0])
+				}
+
+				newresp, err := client.Do(req)
+				if err != nil {
+					log.Printf("[WARNING] Error running body for execute generated app run: %s", err)
+					respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running generated app. Contact support."}`))
+					resp.WriteHeader(500)
+					resp.Write(respBody)
+					return respBody, err
+				}
+
+				// Ensures frontend has something to debug if things go wrong
+				for key, value := range newresp.Header {
+					if strings.HasSuffix(strings.ToLower(key), "-url") {
+
+						// Remove old ones with the same key
+						if _, ok := resp.Header()[key]; ok {
+							resp.Header().Set(key, value[0])
+						} else {
+							resp.Header().Add(key, value[0])
+						}
 					}
 				}
-			}
 
-			defer newresp.Body.Close()
-			apprunBody, err := ioutil.ReadAll(newresp.Body)
-			if err != nil {
-				log.Printf("[WARNING] Failed reading body for execute generated app run: %s", err)
-				respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed unmarshalling app response. Contact support."}`))
-				resp.WriteHeader(500)
-				resp.Write(respBody)
-				return respBody, err
+				defer newresp.Body.Close()
+				apprunBody, err = ioutil.ReadAll(newresp.Body)
+				if err != nil {
+					log.Printf("[WARNING] Failed reading body for execute generated app run: %s", err)
+					respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed unmarshalling app response. Contact support."}`))
+					resp.WriteHeader(500)
+					resp.Write(respBody)
+					return respBody, err
+				}
 			}
 
 			// Parse success struct
 			successStruct := shuffle.ResultChecker{}
-			json.Unmarshal(apprunBody, &successStruct)
+			unmarshallErr := json.Unmarshal(apprunBody, &successStruct)
+			if unmarshallErr != nil {
+				log.Printf("[WARNING] Failed unmarshalling body for execute generated app run: %s", err)
+			}
 
 			httpOutput, marshalledBody, httpParseErr := shuffle.FindHttpBody(apprunBody)
 			//log.Printf("\n\nGOT RESPONSE (%d): %s. STATUS: %d\n\n",  newresp.StatusCode, string(apprunBody), httpOutput.Status)
@@ -2041,6 +2088,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		if err != nil {
 			log.Printf("[WARNING] Failed setting workflow during category run: %s", err)
 		}
+	} else {
+		return handleStandaloneExecution(parentWorkflow)
 	}
 
 	log.Printf("[DEBUG] Done preparing workflow '%s' (%s) to be ran for category action %s", parentWorkflow.Name, parentWorkflow.ID, selectedAction.Name)
@@ -2185,6 +2234,235 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	return jsonParsed, nil
 }
 
+func GetAppOpenapi(appname string) (openapi3.Swagger, error) {
+	swaggerOutput := openapi3.Swagger{}
+	appPath := fmt.Sprintf("%s/apps/%s.json", basepath, appname)
+	log.Printf("[DEBUG] Looking for app: %s", appPath)
+
+	// Check if the app exists
+	// Read the file
+	reader, err := os.Open(appPath)
+	if err != nil {
+		log.Printf("[WARNING] Failed opening app file: %s", err)
+		return swaggerOutput, err
+	}
+
+	defer reader.Close()
+	responseBody, err := ioutil.ReadAll(reader)
+	if err != nil {
+		log.Printf("[WARNING] Failed reading app file: %s", err)
+		return swaggerOutput, err
+	}
+
+	newApp := shuffle.AppParser{}
+	err = json.Unmarshal(responseBody, &newApp)
+	if err != nil {
+		log.Printf("[WARNING] Failed unmarshalling body for singul app: %s %+v", err, string(responseBody))
+		return swaggerOutput, err
+	}
+
+	if !newApp.Success {
+		return swaggerOutput, errors.New("Failed getting app details from backend. Please try again. Appnames may be case sensitive.")
+	}
+
+	if len(newApp.OpenAPI) == 0 {
+		return swaggerOutput, errors.New("Failed finding app for this ID")
+	}
+
+	openapiWrapperParser := shuffle.ParsedOpenApi{}
+	err = json.Unmarshal(newApp.OpenAPI, &openapiWrapperParser)
+	if err != nil {
+		log.Printf("[WARNING] Failed unmarshalling app: %s", err)
+		return swaggerOutput, err
+	}
+
+	if len(openapiWrapperParser.Body) == 0 {
+		return swaggerOutput, errors.New("Failed finding app for this ID")
+	}
+
+	// Unmarshal the newApp.App into workflowApp
+	//err = json.Unmarshal(newApp.OpenAPI, &parsedApp)
+	swagger, err := openapi3.NewSwaggerLoader().LoadSwaggerFromData([]byte(openapiWrapperParser.Body))
+	if err != nil {
+		log.Printf("[WARNING] Failed unmarshalling app: %s", err)
+		return *swagger, err
+	}
+
+	return *swagger, nil
+}
+
+func LocalizeAppscript(appname string) (string, error) {
+	appscriptFolder := fmt.Sprintf("%s/scripts", basepath)
+	scriptPath := fmt.Sprintf("%s/%s.py", appscriptFolder, appname)
+	log.Printf("[DEBUG] Looking for and running script: %s", scriptPath)
+
+	// Create the folders
+	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+		log.Printf("[WARNING] Script path does not exist: %s. Trying to generate.", scriptPath)
+		// Read the appPath -> Unmarshal Openapi into inputSwagger
+		inputSwagger, err := GetAppOpenapi(appname)
+		if err != nil {
+			return "", err
+		}
+
+		newmd5 := fmt.Sprintf("%s-%s", appname, "1.1.0")
+		_, _, pythonFunctions, err := shuffle.GenerateYaml(&inputSwagger, newmd5) 
+		if err != nil {
+			log.Printf("[WARNING] Failed generating app script: %s", err)
+			return "", err
+		}
+
+		//_ = openapiSpec
+		//_ = app
+
+		pythoncode := fmt.Sprintf(shuffle.GetBasePython(), appname, "1.1.0", appname, strings.Join(pythonFunctions, "\n"), appname)
+
+		// Write pythoncode to scriptPath
+		err = os.MkdirAll(appscriptFolder, os.ModePerm)
+		if err != nil {
+			return "", err
+		}
+
+		err = ioutil.WriteFile(scriptPath, []byte(pythoncode), 0644)
+		if err != nil {
+			log.Printf("[WARNING] Failed writing script file: %s", err)
+			return "", err
+		}
+
+		return pythoncode, nil
+	} 
+
+	// Check if the script exists
+	file, err := os.Open(scriptPath)
+	if err != nil {
+		log.Printf("[WARNING] Failed opening script file: %s", err)
+		return "", err
+	}
+
+	defer file.Close()
+	data, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Printf("[WARNING] Failed reading script file: %s", err)
+		return "", err
+	}
+
+	// Check if the script is empty
+	if len(data) == 0 {
+		log.Printf("[WARNING] Script file is empty: %s", scriptPath)
+		return "", errors.New("Script file is empty")
+	}
+
+	return string(data), nil
+}
+
+func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
+
+	returnBody := []byte(fmt.Sprintf(`{"success": false, "reason": "No action taken"}`))
+	if len(workflow.Actions) != 1 {
+		returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Only one action can be executed in standalone mode"}`))
+		return returnBody, errors.New("Only one action can be executed in standalone mode")
+	}
+
+	action := workflow.Actions[0]
+	log.Printf("ACTION NAME: %#v", action.Name)
+	log.Printf("AUTH: %s", action.AuthenticationId)
+
+	allAuths, err := GetLocalAuth() 
+	if err != nil {
+		returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed getting local auths"}`))
+		return returnBody, err
+	}
+
+	sampleExec := shuffle.WorkflowExecution{}
+	action, _ = shuffle.GetAuthentication(context.Background(), sampleExec, action, allAuths) 
+
+	// Look for the app script for the app
+	appName := strings.TrimSpace(strings.ReplaceAll(strings.ToLower(action.AppName), " ", "_"))
+	appscript, err := LocalizeAppscript(appName)
+	if err != nil || len(appscript) == 0 {
+		log.Printf("[WARNING] Failed localizing app script: %s", err)
+		returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed localizing app script"}`))
+		return returnBody, err
+	}
+
+	// Run the script
+	// Command:
+	appscriptFolder := fmt.Sprintf("%s/scripts", basepath)
+	scriptPath := fmt.Sprintf("%s/%s.py", appscriptFolder, appName)
+	// python3 scriptPath --action actionName --params params
+
+	pythonCommandSplit := []string{scriptPath, "--standalone", "--action=" + action.Name}
+	for _, param := range action.Parameters {
+		if param.Required || len(param.Value) > 0 { 
+			//pythonCommand += fmt.Sprintf(` --%s='%s'`, param.Name, param.Value)
+			pythonCommandSplit = append(pythonCommandSplit, fmt.Sprintf("--%s=%s", param.Name, param.Value))
+		} 
+	}
+
+	// Run the command
+	cmd := exec.Command("python3", pythonCommandSplit...)
+
+	//cmd.Dir = appscriptFolder
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Printf("[WARNING] Failed getting stdout pipe: %s", err)
+		returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed getting stdout pipe"}`))
+		return returnBody, err
+	}
+
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		log.Printf("[WARNING] Failed getting stderr pipe: %s", err)
+		returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed getting stderr pipe"}`))
+		return returnBody, err
+	}
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	if err := cmd.Start(); err != nil {
+		log.Printf("[WARNING] Failed starting command: %s", err)
+		returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed starting command"}`))
+		return returnBody, err
+	}
+
+	// Copy output to buffers
+	go io.Copy(&stdoutBuf, stdoutPipe)
+	go io.Copy(&stderrBuf, stderrPipe)
+
+	// Wait for the command to finish
+	if err := cmd.Wait(); err != nil {
+		log.Printf("[WARNING] Failed waiting for command: %s", err)
+		returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed waiting for command"}`))
+		return returnBody, err
+	}
+
+	// Access outputs as strings
+	stdoutStr := stdoutBuf.String()
+	stderrStr := stderrBuf.String()
+	_ = stderrStr
+
+	record := false
+	relevantLines := []string{}
+	for _, line := range strings.Split(stdoutStr, "\n") {
+		if record {
+			relevantLines = append(relevantLines, line)
+		}
+
+		if strings.Contains(line, "====") {
+			record = true
+		}
+	}
+
+	/*
+	if len(stderrStr) > 0 {
+		returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running command", "stderr": "%s"}`, stderrStr))
+		log.Printf("[WARNING] Failed running command: %s", stderrStr)
+		return returnBody, errors.New("Failed running command")
+	}
+	*/
+
+	output := strings.Join(relevantLines, "\n")
+	return []byte(output), nil
+}
 
 func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuffle.WorkflowAppAction) shuffle.WorkflowAppAction {
 	log.Printf("\n\n\n\n")
@@ -2412,9 +2690,17 @@ func AuthenticateAppCli(appname string) error {
 	//log.Printf("[DEBUG] Authentication fields: %#v", app.Authentication.Parameters)
 
 	authId := uuid.NewV4().String()
+
+	smallApp := app
+	smallApp.SmallImage = ""
+	smallApp.LargeImage = ""
+	smallApp.ChildIds = []string{}
+	smallApp.Authentication = shuffle.Authentication{} 
+	smallApp.Actions = []shuffle.WorkflowAppAction{}
+
 	newAuthenticationStorage := shuffle.AppAuthenticationStorage{
 		Id: authId,
-		App: app,
+		App: smallApp,
 
 		Label: "Authentication for " + appname,
 		Active: true, 

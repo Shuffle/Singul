@@ -22,6 +22,8 @@ func runSingul(args []string, flags map[string]string) {
 	value := shuffle.CategoryAction{
 		Label: args[0],
 		AppName: args[1],
+
+		SkipWorkflow: true,
 	}
 
 	// Make a fake ResponseWrite that can actaully receive data
@@ -30,7 +32,10 @@ func runSingul(args []string, flags map[string]string) {
 		log.Printf("[ERROR] Failed running action: %v", err)
 	}
 
-	log.Printf("DATA: %#v. ERR: %#v", string(data), err)
+	log.Printf("OUTPUT: %s", string(data))
+	if err != nil { 
+		log.Printf("ERROR: %#v", err)
+	}
 }
 
 func rootCmdRun(cmd *cobra.Command, args []string) {
