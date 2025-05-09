@@ -1595,7 +1595,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		resp.Header().Add("x-apprun-url", apprunUrl)
 
 		// Runs attempts up to X times
-		maxAttempts := 7
+		maxAttempts := 5
 
 		log.Printf("[DEBUG][AI] Sending single API run execution to %s", apprunUrl)
 		for i := 0; i < maxAttempts; i++ {
@@ -1613,10 +1613,24 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					unmarshalledAction,
 				}
 
-				apprunBody, err = handleStandaloneExecution(parentWorkflow)
+				unparsedBody, err := handleStandaloneExecution(parentWorkflow)
 				if err != nil {
 					log.Printf("[ERROR] Failed running standalone execution: %s", err)
 				}
+
+				// This is the format used in subflow executions, so we just pretend to be the same
+				preparedResponse := shuffle.SubflowData{
+					Success: 	 true,
+					Result: 	 string(unparsedBody),
+					ResultSet: true, 
+				}
+
+				apprunBody, err = json.Marshal(preparedResponse)
+				if err != nil {
+					log.Printf("[ERROR] Failed marshalling response for standalone execution: %s", err)
+				}
+
+
 			} else {
 				// Sends back how many translations happened
 				// -url is just for the app to parse it :(
@@ -1690,6 +1704,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			if unmarshallErr != nil {
 				log.Printf("[WARNING] Failed unmarshalling body for execute generated app run: %s", err)
 			}
+
 
 			httpOutput, marshalledBody, httpParseErr := shuffle.FindHttpBody(apprunBody)
 			//log.Printf("\n\nGOT RESPONSE (%d): %s. STATUS: %d\n\n",  newresp.StatusCode, string(apprunBody), httpOutput.Status)
@@ -1796,6 +1811,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						continue
 					}
 
+					log.Printf("Done 4")
 					go shuffle.UploadParameterBase(context.Background(), user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, param.Name, param.Value)
 					//err = uploadParameterBase(ctx, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, param.Name, param.Value)
 					//if err != nil {
@@ -1873,9 +1889,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			} else {
 				// Parses out data from the output
 				// Reruns the app with the new parameters
-				//log.Printf("HTTP PARSE ERR: %#v", httpParseErr)
+				log.Printf("HTTP PARSE ERR: %#v", httpParseErr)
 				if strings.Contains(strings.ToLower(fmt.Sprintf("%s", httpParseErr)), "status: ") {
-					log.Printf("\n\n\n[DEBUG] Found status code in error: %s\n\n\n", err)
+					log.Printf("[DEBUG] Found status code in schemaless error: %s", httpParseErr)
 
 					outputString, outputAction, err, additionalInfo := shuffle.FindNextApiStep(secondAction, apprunBody, additionalInfo, inputQuery, originalAppname)
 					log.Printf("[DEBUG]\n==== AUTOCORRECT ====\nOUTPUTSTRING: %s\nADDITIONALINFO: %s", outputString, additionalInfo)
@@ -1901,8 +1917,33 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 					} else {
 						log.Printf("[ERROR] Problem in autocorrect (%d):\n%#v\nParams: %d", i, err, len(outputAction.Parameters))
+						if strings.Contains(fmt.Sprintf("%s", err), "missing_fields") {
+							log.Printf("\n\nFOUND MISSING FIELDS ERROR!\n\n")
+							type missingFieldsStruct struct {
+								Success 	  bool `json:"success"`
+								MissingFields []string `json:"missing_fields"`
+							}
+
+							missingFields := missingFieldsStruct{}
+							jsonerr := json.Unmarshal(apprunBody, &missingFields)
+							if jsonerr != nil {
+								log.Printf("[WARNING] Failed unmarshalling missing fields: %s", err)
+							} else {
+								log.Printf("[DEBUG] Found missing fields: %s", missingFields.MissingFields)
+								if missingFields.Success == false && len(missingFields.MissingFields) > 0 {
+									return apprunBody, err
+								}
+							}
+
+							// Try to 
+						}
+
 						if i < maxAttempts-1 {
 							continue
+						} else {
+							resp.WriteHeader(400)
+							resp.Write(apprunBody)
+							return apprunBody, err
 						}
 					}
 				}
@@ -2360,13 +2401,10 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 	returnBody := []byte(fmt.Sprintf(`{"success": false, "reason": "No action taken"}`))
 	if len(workflow.Actions) != 1 {
 		returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Only one action can be executed in standalone mode"}`))
-		return returnBody, errors.New("Only one action can be executed in standalone mode")
+		return returnBody, errors.New(fmt.Sprintf("Only one action can be executed in standalone mode. Found: %d", len(workflow.Actions)))
 	}
 
 	action := workflow.Actions[0]
-	log.Printf("ACTION NAME: %#v", action.Name)
-	log.Printf("AUTH: %s", action.AuthenticationId)
-
 	allAuths, err := GetLocalAuth() 
 	if err != nil {
 		returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed getting local auths"}`))

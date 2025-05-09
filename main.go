@@ -26,15 +26,27 @@ func runSingul(args []string, flags map[string]string) {
 		SkipWorkflow: true,
 	}
 
+	parsedFields := []shuffle.Valuereplace{}
+	for _, flag := range flags {
+		parsedFields= append(parsedFields, shuffle.Valuereplace{
+			Key:   flag,
+			Value: flags[flag],
+		})
+	}
+
+	log.Printf("FIELDS: %#v", parsedFields)
+
+	value.Fields = parsedFields
+
 	// Make a fake ResponseWrite that can actaully receive data
 	data, err := singul.RunAction(ctx, value)
 	if err != nil {
 		log.Printf("[ERROR] Failed running action: %v", err)
 	}
 
-	log.Printf("OUTPUT: %s", string(data))
+	log.Printf("API OUTPUT: %s", string(data))
 	if err != nil { 
-		log.Printf("ERROR: %#v", err)
+		log.Printf("ERROR: %s", err.Error())
 	}
 }
 
@@ -124,7 +136,7 @@ func splitEqual(s string) [2]string {
 }
 
 var rootCmd = &cobra.Command{
-	Use:   "mycli",
+	Use:   "Singul CLI",
 	Short: "A CLI that accepts arbitrary arguments",
 	Args:  cobra.ArbitraryArgs, 
 	DisableFlagParsing: true,
