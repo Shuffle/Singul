@@ -19,7 +19,6 @@ import (
 	"time"
 
 	uuid "github.com/satori/go.uuid"
-	"github.com/algolia/algoliasearch-client-go/v3/algolia/search"
 
 
 	"github.com/frikky/schemaless"
@@ -183,12 +182,12 @@ func setupEnv() {
 }
 
 func RunAction(ctx context.Context, value shuffle.CategoryAction, retries ...int) (string, error) {
+	setupEnv() 
+
 	retriesCount := 0
 	if len(retries) > 0 {
 		retriesCount = retries[0]
 	}
-
-	setupEnv() 
 
 	resp := http.ResponseWriter(nil)
 	request := &http.Request{}
@@ -225,6 +224,17 @@ func RunAction(ctx context.Context, value shuffle.CategoryAction, retries ...int
 	}
 
 	return string(foundResponse), err
+}
+
+func GetActionAIResponseWrapper(ctx context.Context, input shuffle.QueryInput) ([]byte, error) {
+	resp := NewFakeResponseWriter()
+
+	foundResponse, err := shuffle.GetActionAIResponse(ctx, resp, shuffle.User{}, shuffle.Org{}, input.OutputFormat, input)
+	if err != nil {
+		log.Printf("[WARNING] Error with getting action AI response: %s", err)
+	}
+
+	return foundResponse, err
 }
 
 func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.CategoryAction, resp http.ResponseWriter, request *http.Request) ([]byte, error) {
@@ -363,7 +373,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			return respBody, fmt.Errorf("No app name set in category action")
 		}
 
-		relevantApp, err := GetSingulApp(value.AppName)
+		relevantApp, err := shuffle.GetSingulApp(basepath, value.AppName)
 		if err != nil {
 			//log.Printf("[WARNING] Failed getting app %s in category action: %s", value.AppName, err)
 			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed getting app %s"}`, value.AppName))
@@ -588,7 +598,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		mappedString := fmt.Sprintf("%s %s-%s", selectedApp.ID, value.Label, strings.Join(sortedKeys, ""))
 		fieldHash = fmt.Sprintf("%x", md5.Sum([]byte(mappedString)))
 		discoverFile := fmt.Sprintf("file_%s", fieldHash)
-		file, err := shuffle.GetFile(ctx, discoverFile)
+		file, err := GetFileSingul(ctx, discoverFile)
 
 		if err != nil {
 			log.Printf("[ERROR] Problem with getting file '%s' in category action autorun: %s", discoverFile, err)
@@ -1395,13 +1405,12 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 		}
 
-		//formattedQuery := fmt.Sprintf("Use any of the fields '%s' with app %s to '%s'.", strings.Join(formattedQueryFields, "&"), strings.ReplaceAll(selectedApp.Name, "_", " "), strings.ReplaceAll(value.Label, "_", " "))
-		formattedQuery := fmt.Sprintf("Use the fields '%s' with app %s to '%s'.", strings.Join(formattedQueryFields, "&"), strings.ReplaceAll(selectedApp.Name, "_", " "), strings.ReplaceAll(value.Label, "_", " "))
 
+		formattedQuery := fmt.Sprintf("Use the fields '%s' with app %s to '%s'.", strings.Join(formattedQueryFields, "&"), strings.ReplaceAll(selectedApp.Name, "_", " "), strings.ReplaceAll(value.Label, "_", " "))
 		newQueryInput := shuffle.QueryInput{
 			Query:        formattedQuery,
-			OutputFormat: "action", // To run the action (?)
-			//OutputFormat: "action_parameters", 	// To get the action parameters back so we can run it manually
+			//OutputFormat: "action", 		   // To run the action (?)
+			OutputFormat: "action_parameters", 
 
 			//Label: value.Label,
 			Category: value.Category,
@@ -1412,6 +1421,16 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			Parameters: selectedAction.Parameters,
 		}
 
+		responseBody, err := GetActionAIResponseWrapper(ctx, newQueryInput)
+		if err != nil {
+			log.Printf("[WARNING] Failed getting AI response: %s", err)
+			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed getting AI response. Contact support."}`))
+			resp.WriteHeader(500)
+			resp.Write(respBody)
+			return respBody, err
+		}
+
+		/*
 		// JSON marshal and send it back in to /api/conversation with type "action"
 		marshalledBody, err := json.Marshal(newQueryInput)
 		if err != nil {
@@ -1422,13 +1441,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			return respBody, err
 		}
 
-		//streamUrl = "http://localhost:5002"
 		conversationUrl := fmt.Sprintf("%s/api/v1/conversation", baseUrl)
 		log.Printf("[DEBUG][AI] Sending single conversation execution to %s", conversationUrl)
 
 		// Check if "execution_id" & "authorization" queries exist
-		if len(request.Header.Get("Authorization")) == 0 && len(request.URL.Query().Get("execution_id")) > 0 && len(request.URL.Query().Get("authorization")) > 0 {
-			conversationUrl = fmt.Sprintf("%s?execution_id=%s&authorization=%s", conversationUrl, request.URL.Query().Get("execution_id"), request.URL.Query().Get("authorization"))
+		if !standalone {
+			if len(request.Header.Get("Authorization")) == 0 && len(request.URL.Query().Get("execution_id")) > 0 && len(request.URL.Query().Get("authorization")) > 0 {
+				conversationUrl = fmt.Sprintf("%s?execution_id=%s&authorization=%s", conversationUrl, request.URL.Query().Get("execution_id"), request.URL.Query().Get("authorization"))
+			}
 		}
 
 		req, err := http.NewRequest(
@@ -1448,11 +1468,21 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		log.Printf("[DEBUG] MISSINGFIELDS: %#v", missingFields)
 		log.Printf("[DEBUG] LOCAL AI REQUEST SENT TO %s", conversationUrl)
 
-		req.Header.Add("Authorization", request.Header.Get("Authorization"))
-		req.Header.Add("Org-Id", request.Header.Get("Org-Id"))
+		if standalone { 
+			if len(shuffleAuth) == 0 {
+				log.Printf("[WARNING] No SHUFFLE_AUTHORIZATION environment provided for cloud inference")
+				return respBody, errors.New("No SHUFFLE_AUTHORIZATION environment provided for cloud inference")
+			}
 
-		authorization = request.Header.Get("Authorization")
-		orgId = request.Header.Get("Org-Id")
+			req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", shuffleAuth))
+
+		} else {
+			req.Header.Add("Authorization", request.Header.Get("Authorization"))
+			req.Header.Add("Org-Id", request.Header.Get("Org-Id"))
+
+			authorization = request.Header.Get("Authorization")
+			orgId = request.Header.Get("Org-Id")
+		}
 
 		newresp, err := client.Do(req)
 		if err != nil {
@@ -1472,6 +1502,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			resp.Write(respBody)
 			return respBody, err
 		}
+		*/
 
 		//log.Printf("\n\n[DEBUG] TRANSLATED REQUEST RETURNED: %s\n\n", string(responseBody))
 		if strings.Contains(string(responseBody), `"success": false`) {
@@ -1495,10 +1526,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		log.Printf("[DEBUG] Taking params and image from second action and adding to workflow")
 
 		// FIXME: Image?
-		//secondAction.Parameters = newSecondAction.Parameters
-		//secondAction.LargeImage = newSecondAction.LargeImage
 		secondAction.LargeImage = ""
-
 		missingFields = []string{}
 		for _, param := range newSecondAction.Parameters {
 			if param.Configuration {
@@ -1917,7 +1945,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 					} else {
 						log.Printf("[ERROR] Problem in autocorrect (%d):\n%#v\nParams: %d", i, err, len(outputAction.Parameters))
-						if strings.Contains(fmt.Sprintf("%s", err), "missing_fields") {
+						if strings.Contains(fmt.Sprintf("%s", err), "missing_fields") && strings.Contains(fmt.Sprintf("%s", err), "success") {
 							log.Printf("\n\nFOUND MISSING FIELDS ERROR!\n\n")
 							type missingFieldsStruct struct {
 								Success 	  bool `json:"success"`
@@ -1929,8 +1957,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 							if jsonerr != nil {
 								log.Printf("[WARNING] Failed unmarshalling missing fields: %s", err)
 							} else {
-								log.Printf("[DEBUG] Found missing fields: %s", missingFields.MissingFields)
-								if missingFields.Success == false && len(missingFields.MissingFields) > 0 {
+								log.Printf("[DEBUG] Found missing fields: %s. Success: %#v", missingFields.MissingFields, missingFields.Success)
+								if missingFields.Success == false {
+									log.Printf("RETURNING!!")
+									resp.WriteHeader(400)
+									resp.Write(apprunBody)
 									return apprunBody, err
 								}
 							}
@@ -2275,6 +2306,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	return jsonParsed, nil
 }
 
+func GetFileSingul(ctx context.Context, fileId string) (*shuffle.File, error) {
+	if standalone {
+		return &shuffle.File{}, errors.New("Standalone mode not supported")
+	}
+
+	return shuffle.GetFile(ctx, fileId)
+}
+
 func GetAppOpenapi(appname string) (openapi3.Swagger, error) {
 	swaggerOutput := openapi3.Swagger{}
 	appPath := fmt.Sprintf("%s/apps/%s.json", basepath, appname)
@@ -2536,7 +2575,7 @@ func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuff
 			continue
 		} 
 
-		file, err := shuffle.GetFile(ctx, fileId)
+		file, err := GetFileSingul(ctx, fileId)
 		if err != nil || file.Status != "active" {
 			//log.Printf("[WARNING] File %s NOT found or not active. Status: %#v", fileId, file.Status)
 			continue
@@ -2714,7 +2753,7 @@ func GetLocalAuth() ([]shuffle.AppAuthenticationStorage, error) {
 func AuthenticateAppCli(appname string) error {
 	setupEnv()
 
-	app, err := GetSingulApp(appname) 
+	app, err := shuffle.GetSingulApp(basepath, appname) 
 	if err != nil {
 		log.Printf("[ERROR] Failed getting app %s: %s", appname, err)
 		return err
@@ -2800,152 +2839,6 @@ func AuthenticateAppCli(appname string) error {
 	}
 
 	return nil
-}
-
-func GetSingulApp(appname string) (shuffle.WorkflowApp, error) {
-	if len(appname) == 0 {
-		return shuffle.WorkflowApp{}, errors.New("Appname not set")
-	}
-
-	// Look for the file basepath/apps/appname.json
-
-	searchname := strings.ReplaceAll(strings.ToLower(appname), " ", "_")
-	appPath := fmt.Sprintf("%s/apps/%s.json", basepath, searchname)
-
-	var err error
-	responseBody := []byte{}
-
-	_, statErr := os.Stat(appPath) 
-	if statErr == nil {
-		// File exists, read it
-		file, err := os.Open(appPath)
-		if err != nil {
-			return shuffle.WorkflowApp{}, err
-		}
-
-		defer file.Close()
-		responseBody, err = os.ReadFile(appPath)
-		if err != nil {
-			log.Printf("[ERROR] Error reading file: %s", err)
-			return shuffle.WorkflowApp{}, err
-		}
-	} else {
-		algoliaPublicKey := os.Getenv("ALGOLIA_PUBLICKEY")
-		if len(algoliaPublicKey) == 0 {
-			return shuffle.WorkflowApp{}, errors.New("Algolia public key not set")
-		}
-
-		algoliaAppId := "JNSS5CFDZZ"
-		algoliaclient := search.NewClient(algoliaAppId, algoliaPublicKey)
-
-		index := algoliaclient.InitIndex("appsearch")
-		res, err := index.Search(appname)
-		if err != nil {
-			log.Printf("[ERROR] Error searching for app in Algolia index: %s", err)
-			return shuffle.WorkflowApp{}, err
-		}
-
-		appId := ""
-		for _, hit := range res.Hits {
-			if name, ok := hit["appname"]; ok {
-				if !strings.Contains(strings.ToLower(name.(string)), searchname) {
-					continue
-				}
-			}
-
-			if val, ok := hit["objectID"]; ok {
-				appId = val.(string)
-				break
-			} else {
-				log.Printf("[ERROR] App not found in Algolia index: %s", appname)
-			}
-		}
-
-		if appId == "" {
-			log.Printf("[ERROR] App not found in Algolia index: %s", appname)
-			return shuffle.WorkflowApp{}, errors.New("App not found")
-		}
-
-		//url := fmt.Sprintf("https://singul.io/apps/%s", appname)
-		baseUrl := "https://shuffler.io/api/v1"
-		url := fmt.Sprintf("%s/apps/%s/config", baseUrl, appId)
-		req, err := http.NewRequest(
-			"GET", 
-			url, 
-			nil,
-		)
-
-		if err != nil {
-			log.Printf("[ERROR] Error in new request for singul app: %s", err)
-			return shuffle.WorkflowApp{}, err
-		}
-
-		client := &http.Client{}
-		newresp, err := client.Do(req)
-		if err != nil {
-			log.Printf("[ERROR] Error running request for singul app: %s. URL: %s", err, url)
-			return shuffle.WorkflowApp{}, err
-		}
-
-		if newresp.StatusCode != 200 {
-			log.Printf("[ERROR] Bad status code for app: %s. URL: %s", newresp.Status, url)
-			return shuffle.WorkflowApp{}, errors.New("Failed getting app details from backend. Please try again. Appnames may be case sensitive.")
-		}
-
-		defer newresp.Body.Close()
-		responseBody, err = ioutil.ReadAll(newresp.Body)
-		if err != nil {
-			log.Printf("[ERROR] Failed reading body for singul app: %s", err)
-			return shuffle.WorkflowApp{}, err
-		}
-	}
-
-	// Unmarshal responseBody back to
-	newApp := shuffle.AppParser{}
-	err = json.Unmarshal(responseBody, &newApp)
-	if err != nil {
-		log.Printf("[WARNING] Failed unmarshalling body for singul app: %s %+v", err, string(responseBody))
-		return shuffle.WorkflowApp{}, err
-	}
-
-	if !newApp.Success {
-		return shuffle.WorkflowApp{}, errors.New("Failed getting app details from backend. Please try again. Appnames may be case sensitive.")
-	}
-
-	if len(newApp.App) == 0 {
-		return shuffle.WorkflowApp{}, errors.New("Failed finding app for this ID")
-	}
-
-	// Unmarshal the newApp.App into workflowApp
-	parsedApp := shuffle.WorkflowApp{}
-	err = json.Unmarshal(newApp.App, &parsedApp)
-	if err != nil {
-		log.Printf("[WARNING] Failed unmarshalling app: %s", err)
-		return parsedApp, err
-	}
-
-	if len(parsedApp.ID) == 0 {
-		log.Printf("[WARNING] Failed finding app for this ID")
-		return parsedApp, errors.New("Failed finding app for this ID")
-	}
-
-	if statErr != nil {
-		err = os.MkdirAll(fmt.Sprintf("%s/apps", basepath), os.ModePerm)
-		if err != nil {
-			log.Printf("[ERROR] Error creating directory: %s", err)
-			return parsedApp, err
-		}
-
-		err = os.WriteFile(appPath, responseBody, 0644)
-		if err != nil {
-			log.Printf("[ERROR] Error writing file: %s", err)
-			return parsedApp, err
-		} else {
-			log.Printf("[DEBUG] Wrote app to file: %s", appPath)
-		}
-	}
-
-	return parsedApp, nil
 }
 
 // For handling the function without changing ALL the resp.X functions

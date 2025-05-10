@@ -94,6 +94,7 @@ func rootCmdRun(cmd *cobra.Command, args []string) {
 	os.Setenv("ALGOLIA_PUBLICKEY", "14bfd695f2152664bb16ca8e8c3e8281")
 	if len(os.Getenv("SHUFFLE_BACKEND")) == 0 {
 		os.Setenv("SHUFFLE_BACKEND", "https://shuffler.io")
+		os.Setenv("SHUFFLE_CLOUDRUN_URL", "https://shuffler.io")
 	}
 
 	// Ensures Singul runs in "standalone mode"
