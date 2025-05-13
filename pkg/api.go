@@ -344,7 +344,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	_ = labelIndex
 
-	log.Printf("[INFO] Found label '%s' in category '%s'. Indexes for category: %d, and label: %d", value.Label, value.Category, foundIndex, labelIndex)
+	//log.Printf("[INFO] Found label '%s' in category '%s'. Indexes for category: %d, and label: %d", value.Label, value.Category, foundIndex, labelIndex)
 
 	var err error
 	org := &shuffle.Org{}
@@ -519,8 +519,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			// If we DONT have a category app already
 			if app.ID == matchName || appName == matchName {
 				selectedApp = app
-				log.Printf("[DEBUG] Found app - checking label: %s vs %s (%s)", app.Name, value.AppName, app.ID)
-				//selectedAction, selectedCategory, availableLabels = shuffle.GetActionFromLabel(ctx, selectedApp, value.Label, true)
+				//log.Printf("[DEBUG] Found app - checking label: %s vs %s (%s)", app.Name, value.AppName, app.ID)
+
 				selectedAction, selectedCategory, availableLabels = GetActionFromLabel(ctx, app, value.Label, true, value.Fields, 0)
 				partialMatch = false
 
@@ -602,6 +602,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		mappedString := fmt.Sprintf("%s %s-%s", selectedApp.ID, value.Label, strings.Join(sortedKeys, ""))
 		fieldHash = fmt.Sprintf("%x", md5.Sum([]byte(mappedString)))
 		discoverFile := fmt.Sprintf("file_%s", fieldHash)
+
+		if debug {
+			log.Printf("[DEBUG] Loading content mapping for fields '%s' with hash '%s'. Filepath: '%s'", strings.Join(sortedKeys, ","), fieldHash, discoverFile)
+		}
+
 		file, err := shuffle.GetFileSingul(ctx, discoverFile)
 		if err != nil {
 			log.Printf("[ERROR] Problem with getting file '%s' in category action autorun: %s", discoverFile, err)
@@ -612,7 +617,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 				fieldFileFound = true
 
-				log.Printf("[DEBUG File found: %s", file.Filename)
+				//log.Printf("[DEBUG] File found: %s", file.Filename)
 
 				fileContent, err := shuffle.GetFileContentSingul(ctx, file, nil)
 				if err != nil {
@@ -620,7 +625,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					fieldFileFound = false
 				}
 
-				log.Printf("Output content: %#v", string(fileContent))
+				//log.Printf("Output content: %#v", string(fileContent))
 				err = json.Unmarshal(fileContent, &fieldFileContentMap)
 				if err != nil {
 					log.Printf("[ERROR] Failed unmarshaling file content in category action: %s", err)
@@ -1212,8 +1217,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	if len(handledRequiredFields) < len(value.Fields) {
 		// Compare which ones are not handled from value.Fields
-		log.Printf("[DEBUG] handledRequiredFields: %+v", handledRequiredFields)
 
+		/*
+		log.Printf("[DEBUG] handledRequiredFields: %+v", handledRequiredFields)
 		for _, field := range value.Fields {
 			log.Printf("[DEBUG] fields provided: %s - %s", field.Key, field.Value)
 		}
@@ -1225,6 +1231,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		for missingIndex, missingField := range missingFields {
 			log.Printf("[DEBUG] missingField %d. %s", missingIndex, missingField)
 		}
+		*/
 
 		for _, field := range value.Fields {
 			if !shuffle.ArrayContains(handledRequiredFields, field.Key) {
@@ -1232,7 +1239,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 		}
 
-		log.Printf("[WARNING] Not all required fields were handled. Missing: %#v. Should force use of all fields? Handled fields: %3v", missingFields, handledRequiredFields)
+		log.Printf("[WARNING] Not all required fields were handled (1). Missing: %#v. Should force use of all fields? Handled fields: %3v", missingFields, handledRequiredFields)
 	}
 
 	// Send request to /api/v1/conversation with this data
@@ -1252,6 +1259,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	selectedAction.AppVersion = selectedApp.AppVersion
 
 	for _, missing := range missingFields {
+		// FIXME: ONLY body is handled well so far?
 		if missing != "body" {
 			continue
 		}
@@ -1325,11 +1333,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 			// Check if the key exists in the parameters
 			for paramIndex, param := range selectedAction.Parameters {
-				log.Printf("[DEBUG] Checking param %s with value %+v", param.Name, mappedFieldSplit)
-
 				if param.Name != mappedFieldSplit[0] {
 					continue
 				}
+
+				//log.Printf("[DEBUG] Found matching param %s with value %+v", param.Name, mappedFieldSplit)
 
 				foundIndex = paramIndex
 				if param.Name == "queries" {
@@ -1341,14 +1349,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 					missingFields = shuffle.RemoveFromArray(missingFields, key)
 				} else if param.Name == "body" {
-					log.Printf("\n\n\n[DEBUG] Found body field for file content: %s. Location: %#v, Value: %#v\n\n\n", key, strings.Join(mappedFieldSplit, "."), mapValue)
+					//log.Printf("\n\n\n[DEBUG] Found body field for file content: %s. Location: %#v, Value: %#v\n\n\n", key, strings.Join(mappedFieldSplit, "."), mapValue)
 
 					newBody := param.Value
 
 					mapToSearch := map[string]interface{}{}
 					err := json.Unmarshal([]byte(newBody), &mapToSearch)
 					if err != nil {
-						log.Printf("[WARNING] Failed unmarshalling body for file content: %s. Body: %s", err, string(newBody))
+						log.Printf("[ERROR] Failed unmarshalling body for file content: %s. Body: %#v", err, string(newBody))
 						continue
 					}
 
@@ -1361,12 +1369,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					if err != nil {
 						log.Printf("[WARNING] Failed marshalling body for file content: %s", err)
 					} else {
-						log.Printf("[DEBUG] setting parameter value to %s", string(marshalledMap))
+						//log.Printf("[DEBUG] setting parameter value to %s", string(marshalledMap))
 						selectedAction.Parameters[paramIndex].Value = string(marshalledMap)
-						log.Printf("[DEBUG] Found value for key %s: %s -- %+v", key, mapValue, missingFields)
+						//log.Printf("[DEBUG] Found value for key %s: %s -- %+v", key, mapValue, missingFields)
 						missingFields = shuffle.RemoveFromArray(missingFields, key)
-						log.Printf("[DEBUG] Found value for key %s: %s -- %+v", key, mapValue, missingFields)
+						//log.Printf("[DEBUG] Found value for key %s: %s -- %+v", key, mapValue, missingFields)
 					}
+
+					log.Printf("NEW BODY: %#v", string(marshalledMap))
 				} else {
 					log.Printf("\n\n\n[DEBUG] Found map with actionParameter %s with value %s\n\n\n", param.Name, mapValue)
 
@@ -1487,7 +1497,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	if value.SkipWorkflow {
 
 		if len(missingFields) > 0 {
-			log.Printf("[WARNING] Not all required fields were found in category action. Want: %#v in action %s", missingFields, selectedAction.Name)
+			log.Printf("[WARNING] Not all required fields were found in category action (2). Want: %#v in action %s", missingFields, selectedAction.Name)
 			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Not all required fields are set", "label": "%s", "missing_fields": "%s", "action": "%s", "api_debugger_url": "%s"}`, value.Label, strings.Join(missingFields, ","), selectedAction.Name, fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID)))
 			resp.WriteHeader(400)
 			resp.Write(respBody)
@@ -1772,7 +1782,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						continue
 					}
 
-					log.Printf("Done 4")
 					go shuffle.UploadParameterBase(context.Background(), user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, param.Name, param.Value)
 					//err = uploadParameterBase(ctx, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, param.Name, param.Value)
 					//if err != nil {
@@ -1861,7 +1870,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					// This makes the NEXT loop iterator run with the
 					// output params from this one
 					if err == nil && len(outputAction.Parameters) > 0 {
-						log.Printf("[DEBUG] Found output action: %s", outputAction.Name)
 						secondAction.Name = outputAction.Name
 						secondAction.Label = outputAction.Label
 						secondAction.Parameters = outputAction.Parameters
@@ -1873,9 +1881,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 							return apprunBody, nil 
 						}
 
-						log.Printf("\n\nRUNNING WITH NEW PARAMS. Index: %d\n\n", i)
 						continue
-
 					} else {
 						log.Printf("[ERROR] Problem in autocorrect (%d):\n%#v\nParams: %d", i, err, len(outputAction.Parameters))
 						if strings.Contains(fmt.Sprintf("%s", err), "missing_fields") && strings.Contains(fmt.Sprintf("%s", err), "success") {
@@ -2365,8 +2371,6 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 		appTimeout := "30"
 		os.Setenv("SHUFFLE_APP_SDK_TIMEOUT", appTimeout)
 		log.Printf("Set App timeout to %s seconds", appTimeout)
-	} else {
-		log.Printf("[DEBUG] Using preconfiguring App timeout: %s seconds", os.Getenv("SHUFFLE_APP_SDK_TIMEOUT"))
 	}
 
 	returnBody := []byte(fmt.Sprintf(`{"success": false, "reason": "No action taken"}`))
@@ -2589,7 +2593,7 @@ func GetActionFromLabel(ctx context.Context, app shuffle.WorkflowApp, label stri
 			availableLabels = append(availableLabels, label)
 
 			if newLabel == lowercaseLabel || strings.HasPrefix(newLabel, lowercaseLabel) {
-				//log.Printf("[DEBUG] Found action for label '%s' in app %s (%s): %s", label, app.Name, app.ID, action.Name)
+				//log.Printf("[DEBUG] Found action for label '%s' in app %s (%s): %s (1)", label, app.Name, app.ID, action.Name)
 				selectedAction = action
 
 				for _, category := range categories {
@@ -2632,7 +2636,7 @@ func GetActionFromLabel(ctx context.Context, app shuffle.WorkflowApp, label stri
 			//}
 
 			if guessedAction.Name != "" {
-				log.Printf("[DEBUG] Found action for label '%s' in app %s (%s): %s", label, newApp.Name, newApp.ID, guessedAction.Name)
+				//log.Printf("[DEBUG] Found action for label '%s' in app %s (%s): %s (2)", label, newApp.Name, newApp.ID, guessedAction.Name)
 				selectedAction = guessedAction
 			} else {
 				if count > 5 {
