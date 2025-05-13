@@ -16,7 +16,7 @@ import (
 // OR
 // Shuffle-shared -> Singul?
 func runSingul(args []string, flags map[string]string) {
-	log.Printf("Running Singul with args: %v and flags: %v\n", args, flags)
+	//log.Printf("[DEBUG] Running Singul with args: %v and flags: %v\n", args, flags)
 
 	ctx := context.Background()
 	value := shuffle.CategoryAction{
@@ -32,6 +32,11 @@ func runSingul(args []string, flags map[string]string) {
 			key = strings.TrimPrefix(key, "--")
 		} else if strings.HasPrefix(key, "-") {
 			key = strings.TrimPrefix(key, "-")
+		}
+
+		if key == "body" {
+			log.Printf("[ERROR] 'body' is a reserved field name. Please use 'data', 'content' or similar instead.")
+			return
 		}
 
 		parsedFields = append(parsedFields, shuffle.Valuereplace{
@@ -59,7 +64,6 @@ func rootCmdRun(cmd *cobra.Command, args []string) {
 
     parsedFlags := map[string]string{}
 	for i := 0; i < len(args); i++ {
-		log.Printf("ARGS: %#v", args[i])
 		if args[i][0] == '-' {
 			// handle both -f val, --flag=val and --flag val
 			if i+1 < len(args) && args[i+1][0] != '-' && !containsEqual(args[i]) {
@@ -173,7 +177,6 @@ func main() {
 	log.Printf("RESP: %#v", resp[0].Value)
 	os.Exit(3)
 	*/
-
 
 	// Register subcommands to the math command
 	if err := rootCmd.Execute(); err != nil {

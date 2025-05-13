@@ -602,7 +602,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		mappedString := fmt.Sprintf("%s %s-%s", selectedApp.ID, value.Label, strings.Join(sortedKeys, ""))
 		fieldHash = fmt.Sprintf("%x", md5.Sum([]byte(mappedString)))
 		discoverFile := fmt.Sprintf("file_%s", fieldHash)
-		file, err := GetFileSingul(ctx, discoverFile)
+		file, err := shuffle.GetFileSingul(ctx, discoverFile)
 		if err != nil {
 			log.Printf("[ERROR] Problem with getting file '%s' in category action autorun: %s", discoverFile, err)
 		} else {
@@ -614,7 +614,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 				log.Printf("[DEBUG File found: %s", file.Filename)
 
-				fileContent, err := GetFileContentSingul(ctx, file, nil)
+				fileContent, err := shuffle.GetFileContentSingul(ctx, file, nil)
 				if err != nil {
 					log.Printf("[ERROR] Failed getting file content in category action: %s", err)
 					fieldFileFound = false
@@ -1432,7 +1432,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			return respBody, err
 		}
 
-		log.Printf("GOT RESPONSE BODY (params): %#v", string(responseBody))
+		//log.Printf("[DEBUG] GOT RESPONSE BODY (params): %#v", string(responseBody))
 
 		//log.Printf("\n\n[DEBUG] TRANSLATED REQUEST RETURNED: %s\n\n", string(responseBody))
 		if strings.Contains(string(responseBody), `"success": false`) {
@@ -1837,7 +1837,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 									},
 								}
 
-								returnedId, err := shuffle.UploadFile(context.Background(), file, encryptionKey, []byte(reversed))
+								returnedId, err := shuffle.UploadFileSingul(context.Background(), file, encryptionKey, []byte(reversed))
 								if err != nil {
 									log.Printf("[ERROR] Problem uploading file: %s", err)
 								} else {
@@ -2239,25 +2239,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	return jsonParsed, nil
 }
 
-func GetFileContentSingul(ctx context.Context, file *shuffle.File, resp http.ResponseWriter) ([]byte, error) {
-	if standalone {
-		return []byte{}, errors.New(fmt.Sprintf("Standalone mode not supported/implemented YET for file CONTENT ID '%s'", file.Id))
-	}
-
-	return shuffle.GetFileContent(ctx, file, resp)
-}
-
-func GetFileSingul(ctx context.Context, fileId string) (*shuffle.File, error) {
-	if standalone {
-		return &shuffle.File{
-			Status: "active",
-			Id:    fileId,
-		}, nil
-	}
-
-	return shuffle.GetFile(ctx, fileId)
-}
-
 func GetAppOpenapi(appname string) (openapi3.Swagger, error) {
 	swaggerOutput := openapi3.Swagger{}
 	appPath := fmt.Sprintf("%s/apps/%s.json", basepath, appname)
@@ -2535,7 +2516,7 @@ func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuff
 			continue
 		} 
 
-		file, err := GetFileSingul(ctx, fileId)
+		file, err := shuffle.GetFileSingul(ctx, fileId)
 		if err != nil || file.Status != "active" {
 			log.Printf("[WARNING] File %s NOT found or not active. Status: %#v. Err: %s", fileId, file.Status, err)
 			continue
@@ -2547,7 +2528,7 @@ func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuff
 
 		// make a fake resp to get the content
 		//func GetFileContent(ctx context.Context, file *File, resp http.ResponseWriter) ([]byte, error) {
-		content, err := GetFileContentSingul(ctx, file, nil)
+		content, err := shuffle.GetFileContentSingul(ctx, file, nil)
 		if err != nil {
 			continue
 		}
