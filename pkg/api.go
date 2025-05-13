@@ -177,7 +177,9 @@ func setupEnv() {
 			basepath = filepath
 		}
 
-		log.Printf("[DEBUG] Using local storage path '%s' for files", basepath)
+		if debug {
+			log.Printf("[DEBUG] Using local storage path '%s' for files", basepath)
+		}
 	}
 }
 
@@ -1305,7 +1307,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	// Finds WHERE in the destination to put the input data
 	// Loops through input fields, then takes the data from them
 	if len(fieldFileContentMap) > 0 {
-		log.Printf("[DEBUG] Found file content map (Reverse Schemaless): %#v", fieldFileContentMap)
+		log.Printf("[DEBUG] Found file content map (Pre Reverse Schemaless): %#v", fieldFileContentMap)
 
 		for key, mapValue := range fieldFileContentMap {
 			if _, ok := mapValue.(string); !ok {
@@ -1328,8 +1330,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				mapValue = field.Value
 				break
 			}
-
-			log.Printf("[DEBUG] Found value for key %#v: '%s'", key, mapValue)
 
 			// Check if the key exists in the parameters
 			for paramIndex, param := range selectedAction.Parameters {
@@ -1369,24 +1369,21 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					if err != nil {
 						log.Printf("[WARNING] Failed marshalling body for file content: %s", err)
 					} else {
-						//log.Printf("[DEBUG] setting parameter value to %s", string(marshalledMap))
 						selectedAction.Parameters[paramIndex].Value = string(marshalledMap)
-						//log.Printf("[DEBUG] Found value for key %s: %s -- %+v", key, mapValue, missingFields)
 						missingFields = shuffle.RemoveFromArray(missingFields, key)
-						//log.Printf("[DEBUG] Found value for key %s: %s -- %+v", key, mapValue, missingFields)
 					}
 
 					log.Printf("NEW BODY: %#v", string(marshalledMap))
 				} else {
-					log.Printf("\n\n\n[DEBUG] Found map with actionParameter %s with value %s\n\n\n", param.Name, mapValue)
-
-					// YOLO
+					// Hmm
 					selectedAction.Parameters[paramIndex].Value = mapValue.(string)
 
-					log.Printf("[DEBUG] Found value for key %s: %s -- %+v", key, mapValue, missingFields)
+					if debug {
+						log.Printf("[DEBUG] Found value for key (NOT body/queries) %s: %s -- %+v... PARAM NAME: %#v", key, mapValue, missingFields, param.Name)
+					}
+
 					missingFields = shuffle.RemoveFromArray(missingFields, key)
 					missingFields = shuffle.RemoveFromArray(missingFields, selectedAction.Parameters[paramIndex].Name)
-					log.Printf("[DEBUG] Found value for key %s: %s -- %+v", key, mapValue, missingFields)
 
 					secondAction.Parameters = selectedAction.Parameters
 				}
@@ -1401,7 +1398,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	orgId := ""
 	authorization := ""
 	optionalExecutionId := ""
-	log.Printf("\n\n\n[DEBUG] Missing fields for action: %#v\n\n\n", missingFields)
+	if debug {
+		log.Printf("\n\n\n[DEBUG] Missing fields for action: %#v\n\n\n", missingFields)
+	}
+
 	if len(missingFields) > 0 {
 		formattedQueryFields := []string{}
 		for _, missing := range missingFields {
@@ -1463,9 +1463,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			return respBody, err
 		}
 
-		log.Printf("[DEBUG] Taking params and image from second action and adding to workflow")
-
-		// FIXME: Image?
 		secondAction.LargeImage = ""
 		missingFields = []string{}
 		for _, param := range newSecondAction.Parameters {
@@ -1757,7 +1754,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 
 			if httpParseErr == nil && httpOutput.Status < 300 {
-				log.Printf("[DEBUG] Found status from schemaless: %d. Should save the current fields as new base", httpOutput.Status)
+				if debug {
+					log.Printf("[DEBUG] Found status from schemaless: %d. Should save the current fields as new base", httpOutput.Status)
+				}
 
 				parsedParameterMap := map[string]interface{}{}
 				for _, param := range secondAction.Parameters {
@@ -1855,16 +1854,23 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 							}
 						}
 					}()
+				} else {
+					log.Printf("[ERROR] fieldfile NOT found for hash: %#v", fieldHash)
 				}
+
 			} else {
 				// Parses out data from the output
 				// Reruns the app with the new parameters
-				log.Printf("HTTP PARSE ERR: %#v", httpParseErr)
 				if strings.Contains(strings.ToLower(fmt.Sprintf("%s", httpParseErr)), "status: ") {
-					log.Printf("[DEBUG] Found status code in schemaless error: %s", httpParseErr)
+					if debug {
+						log.Printf("[DEBUG] Found status code in schemaless error: %s", httpParseErr)
+					}
 
 					outputString, outputAction, err, additionalInfo := shuffle.FindNextApiStep(secondAction, apprunBody, additionalInfo, inputQuery, originalAppname)
-					log.Printf("[DEBUG]\n==== AUTOCORRECT ====\nOUTPUTSTRING: %s\nADDITIONALINFO: %s", outputString, additionalInfo)
+
+					if debug {
+						log.Printf("[DEBUG]\n==== AUTOCORRECT ====\nOUTPUTSTRING: %s\nADDITIONALINFO: %s", outputString, additionalInfo)
+					}
 
 					// Rewriting before continuing
 					// This makes the NEXT loop iterator run with the
@@ -1914,6 +1920,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 							return apprunBody, err
 						}
 					}
+				} else {
+					log.Printf("[ERROR] Failed parsing output in Singul: %s. This may mean that a status code was not found.", httpParseErr)
 				}
 
 				marshalledOutput, err := json.Marshal(parsedTranslation)
@@ -2248,7 +2256,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 func GetAppOpenapi(appname string) (openapi3.Swagger, error) {
 	swaggerOutput := openapi3.Swagger{}
 	appPath := fmt.Sprintf("%s/apps/%s.json", basepath, appname)
-	log.Printf("[DEBUG] Looking for app: %s", appPath)
+
+	if debug {
+		log.Printf("[DEBUG] Looking for app '%s' in path '%s'", appname, appPath)
+	}
 
 	// Check if the app exists
 	// Read the file
