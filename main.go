@@ -27,14 +27,18 @@ func runSingul(args []string, flags map[string]string) {
 	}
 
 	parsedFields := []shuffle.Valuereplace{}
-	for _, flag := range flags {
-		parsedFields= append(parsedFields, shuffle.Valuereplace{
-			Key:   flag,
-			Value: flags[flag],
+	for key, value := range flags {
+		if strings.HasPrefix(key, "--") {
+			key = strings.TrimPrefix(key, "--")
+		} else if strings.HasPrefix(key, "-") {
+			key = strings.TrimPrefix(key, "-")
+		}
+
+		parsedFields = append(parsedFields, shuffle.Valuereplace{
+			Key:   key,
+			Value: value,
 		})
 	}
-
-	log.Printf("FIELDS: %#v", parsedFields)
 
 	value.Fields = parsedFields
 
@@ -52,11 +56,12 @@ func runSingul(args []string, flags map[string]string) {
 
 func rootCmdRun(cmd *cobra.Command, args []string) {
 	parsedArgs := []string{}
-    parsedFlags := map[string]string{}
 
+    parsedFlags := map[string]string{}
 	for i := 0; i < len(args); i++ {
+		log.Printf("ARGS: %#v", args[i])
 		if args[i][0] == '-' {
-			// handle both -f val and --flag=val
+			// handle both -f val, --flag=val and --flag val
 			if i+1 < len(args) && args[i+1][0] != '-' && !containsEqual(args[i]) {
 				parsedFlags[args[i]] = args[i+1]
 				i++
@@ -145,6 +150,31 @@ var rootCmd = &cobra.Command{
 }
 
 func main() {
+	/*
+	translateData := `{
+	  "fields": {
+		"project": {
+		  "key": "SHUF"
+		},
+		"summary": "{{summary}}",
+		"issuetype": {
+		  "name": "{{issuetype[]}}"
+		}
+	  }
+	}`
+
+	data := []shuffle.Valuereplace{
+		shuffle.Valuereplace{
+			Key: "body",
+			Value: translateData,
+		},
+	}
+	resp := shuffle.TranslateBadFieldFormats(data)
+	log.Printf("RESP: %#v", resp[0].Value)
+	os.Exit(3)
+	*/
+
+
 	// Register subcommands to the math command
 	if err := rootCmd.Execute(); err != nil {
         log.Printf("%#v", err)

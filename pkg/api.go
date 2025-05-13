@@ -382,7 +382,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			return respBody, err
 		}
 
-		newapps = append(newapps, relevantApp)
+		newapps = append(newapps, *relevantApp)
 	}
 
 	if value.Category == "email" {
@@ -413,6 +413,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	} else {
 		if len(foundAppType) > 0 {
 			log.Printf("[ERROR] Unknown app type in category action: %#v", foundAppType)
+			foundCategory = shuffle.Category{
+				Name: foundAppType,
+				ID:   foundAppType,
+			}
 		}
 	}
 
@@ -599,7 +603,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		fieldHash = fmt.Sprintf("%x", md5.Sum([]byte(mappedString)))
 		discoverFile := fmt.Sprintf("file_%s", fieldHash)
 		file, err := GetFileSingul(ctx, discoverFile)
-
 		if err != nil {
 			log.Printf("[ERROR] Problem with getting file '%s' in category action autorun: %s", discoverFile, err)
 		} else {
@@ -611,7 +614,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 				log.Printf("[DEBUG File found: %s", file.Filename)
 
-				fileContent, err := shuffle.GetFileContent(ctx, file, nil)
+				fileContent, err := GetFileContentSingul(ctx, file, nil)
 				if err != nil {
 					log.Printf("[ERROR] Failed getting file content in category action: %s", err)
 					fieldFileFound = false
@@ -1388,9 +1391,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	orgId := ""
 	authorization := ""
 	optionalExecutionId := ""
+	log.Printf("\n\n\n[DEBUG] Missing fields for action: %#v\n\n\n", missingFields)
 	if len(missingFields) > 0 {
-		log.Printf("\n\n\n[DEBUG] Missing fields for action: %#v\n\n\n", missingFields)
-
 		formattedQueryFields := []string{}
 		for _, missing := range missingFields {
 
@@ -1430,79 +1432,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			return respBody, err
 		}
 
-		/*
-		// JSON marshal and send it back in to /api/conversation with type "action"
-		marshalledBody, err := json.Marshal(newQueryInput)
-		if err != nil {
-			log.Printf("[WARNING] Failed marshalling action: %s", err)
-			respBody = []byte(`{"success": false, "reason": "Failed marshalling action"}`)
-			resp.WriteHeader(500)
-			resp.Write(respBody)
-			return respBody, err
-		}
-
-		conversationUrl := fmt.Sprintf("%s/api/v1/conversation", baseUrl)
-		log.Printf("[DEBUG][AI] Sending single conversation execution to %s", conversationUrl)
-
-		// Check if "execution_id" & "authorization" queries exist
-		if !standalone {
-			if len(request.Header.Get("Authorization")) == 0 && len(request.URL.Query().Get("execution_id")) > 0 && len(request.URL.Query().Get("authorization")) > 0 {
-				conversationUrl = fmt.Sprintf("%s?execution_id=%s&authorization=%s", conversationUrl, request.URL.Query().Get("execution_id"), request.URL.Query().Get("authorization"))
-			}
-		}
-
-		req, err := http.NewRequest(
-			"POST",
-			conversationUrl,
-			bytes.NewBuffer(marshalledBody),
-		)
-
-		if err != nil {
-			log.Printf("[WARNING] Error in new request for execute generated workflow: %s", err)
-			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed preparing new request. Contact support."}`))
-			resp.WriteHeader(500)
-			resp.Write(respBody)
-			return respBody, err
-		}
-
-		log.Printf("[DEBUG] MISSINGFIELDS: %#v", missingFields)
-		log.Printf("[DEBUG] LOCAL AI REQUEST SENT TO %s", conversationUrl)
-
-		if standalone { 
-			if len(shuffleAuth) == 0 {
-				log.Printf("[WARNING] No SHUFFLE_AUTHORIZATION environment provided for cloud inference")
-				return respBody, errors.New("No SHUFFLE_AUTHORIZATION environment provided for cloud inference")
-			}
-
-			req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", shuffleAuth))
-
-		} else {
-			req.Header.Add("Authorization", request.Header.Get("Authorization"))
-			req.Header.Add("Org-Id", request.Header.Get("Org-Id"))
-
-			authorization = request.Header.Get("Authorization")
-			orgId = request.Header.Get("Org-Id")
-		}
-
-		newresp, err := client.Do(req)
-		if err != nil {
-			log.Printf("[WARNING] Error running body for execute generated workflow: %s", err)
-			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running app %s (%s). Contact support."}`, selectedAction.Name, selectedAction.AppID))
-			resp.WriteHeader(500)
-			resp.Write(respBody)
-			return respBody, err
-		}
-
-		defer newresp.Body.Close()
-		responseBody, err := ioutil.ReadAll(newresp.Body)
-		if err != nil {
-			log.Printf("[WARNING] Failed reading body for execute generated workflow: %s", err)
-			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed unmarshalling app response. Contact support."}`))
-			resp.WriteHeader(500)
-			resp.Write(respBody)
-			return respBody, err
-		}
-		*/
+		log.Printf("GOT RESPONSE BODY (params): %#v", string(responseBody))
 
 		//log.Printf("\n\n[DEBUG] TRANSLATED REQUEST RETURNED: %s\n\n", string(responseBody))
 		if strings.Contains(string(responseBody), `"success": false`) {
@@ -1625,7 +1555,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		// Runs attempts up to X times
 		maxAttempts := 5
 
-		log.Printf("[DEBUG][AI] Sending single API run execution to %s", apprunUrl)
+		//if !standalone { 
+		//	log.Printf("[DEBUG][AI] Sending single API run execution to %s", apprunUrl)
+		//}
+
 		for i := 0; i < maxAttempts; i++ {
 
 			// The request that goes to the CORRECT app
@@ -1946,20 +1879,18 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					} else {
 						log.Printf("[ERROR] Problem in autocorrect (%d):\n%#v\nParams: %d", i, err, len(outputAction.Parameters))
 						if strings.Contains(fmt.Sprintf("%s", err), "missing_fields") && strings.Contains(fmt.Sprintf("%s", err), "success") {
-							log.Printf("\n\nFOUND MISSING FIELDS ERROR!\n\n")
 							type missingFieldsStruct struct {
 								Success 	  bool `json:"success"`
 								MissingFields []string `json:"missing_fields"`
 							}
 
 							missingFields := missingFieldsStruct{}
-							jsonerr := json.Unmarshal(apprunBody, &missingFields)
+							jsonerr := json.Unmarshal([]byte(err.Error()), &missingFields)
 							if jsonerr != nil {
 								log.Printf("[WARNING] Failed unmarshalling missing fields: %s", err)
 							} else {
-								log.Printf("[DEBUG] Found missing fields: %s. Success: %#v", missingFields.MissingFields, missingFields.Success)
+								//log.Printf("[DEBUG] Found missing fields: %s. Success: %#v", missingFields.MissingFields, missingFields.Success)
 								if missingFields.Success == false {
-									log.Printf("RETURNING!!")
 									resp.WriteHeader(400)
 									resp.Write(apprunBody)
 									return apprunBody, err
@@ -2003,9 +1934,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				baseUrl = strings.Join(baseurlSplit[0:3], "/")
 			}
 
+			// No shuffler.io config for standalone runs
 			authConfig := fmt.Sprintf("%s,%s,%s,%s", baseUrl, authorization, orgId, optionalExecutionId)
-
-			//log.Printf("\n\n[DEBUG] BASEURL FOR SCHEMALESS: %s\nAUTHCONFIG: %s\n\n", streamUrl, authConfig)
+			if standalone {
+				authConfig = ""
+			}
 
 			outputmap := make(map[string]interface{})
 			schemalessOutput, err := schemaless.Translate(ctx, value.Label, marshalledBody, authConfig)
@@ -2306,9 +2239,20 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	return jsonParsed, nil
 }
 
+func GetFileContentSingul(ctx context.Context, file *shuffle.File, resp http.ResponseWriter) ([]byte, error) {
+	if standalone {
+		return []byte{}, errors.New(fmt.Sprintf("Standalone mode not supported/implemented YET for file CONTENT ID '%s'", file.Id))
+	}
+
+	return shuffle.GetFileContent(ctx, file, resp)
+}
+
 func GetFileSingul(ctx context.Context, fileId string) (*shuffle.File, error) {
 	if standalone {
-		return &shuffle.File{}, errors.New("Standalone mode not supported")
+		return &shuffle.File{
+			Status: "active",
+			Id:    fileId,
+		}, nil
 	}
 
 	return shuffle.GetFile(ctx, fileId)
@@ -2374,7 +2318,7 @@ func GetAppOpenapi(appname string) (openapi3.Swagger, error) {
 func LocalizeAppscript(appname string) (string, error) {
 	appscriptFolder := fmt.Sprintf("%s/scripts", basepath)
 	scriptPath := fmt.Sprintf("%s/%s.py", appscriptFolder, appname)
-	log.Printf("[DEBUG] Looking for and running script: %s", scriptPath)
+	//log.Printf("[DEBUG] Looking for and running script: %s", scriptPath)
 
 	// Create the folders
 	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
@@ -2436,11 +2380,27 @@ func LocalizeAppscript(appname string) (string, error) {
 }
 
 func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
+	if len(os.Getenv("SHUFFLE_APP_SDK_TIMEOUT")) == 0 {
+		appTimeout := "30"
+		os.Setenv("SHUFFLE_APP_SDK_TIMEOUT", appTimeout)
+		log.Printf("Set App timeout to %s seconds", appTimeout)
+	} else {
+		log.Printf("[DEBUG] Using preconfiguring App timeout: %s seconds", os.Getenv("SHUFFLE_APP_SDK_TIMEOUT"))
+	}
 
 	returnBody := []byte(fmt.Sprintf(`{"success": false, "reason": "No action taken"}`))
 	if len(workflow.Actions) != 1 {
-		returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Only one action can be executed in standalone mode"}`))
-		return returnBody, errors.New(fmt.Sprintf("Only one action can be executed in standalone mode. Found: %d", len(workflow.Actions)))
+		log.Printf("EXECUTION ACTIONS: %d. CHoosing the LAST node.", len(workflow.Actions))
+		for _, action := range workflow.Actions {
+			log.Printf("ACTION - Name: %s, Label: %s, AppID: %s", action.Name, action.Label, action.AppID)
+		}
+
+		workflow.Actions = []shuffle.Action{
+			workflow.Actions[len(workflow.Actions)-1],
+		}
+
+		//returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Only one action can be executed in standalone mode"}`))
+		//return returnBody, errors.New(fmt.Sprintf("Only one action can be executed in standalone mode. Found: %d", len(workflow.Actions)))
 	}
 
 	action := workflow.Actions[0]
@@ -2577,7 +2537,7 @@ func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuff
 
 		file, err := GetFileSingul(ctx, fileId)
 		if err != nil || file.Status != "active" {
-			//log.Printf("[WARNING] File %s NOT found or not active. Status: %#v", fileId, file.Status)
+			log.Printf("[WARNING] File %s NOT found or not active. Status: %#v. Err: %s", fileId, file.Status, err)
 			continue
 		}
 
@@ -2587,7 +2547,7 @@ func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuff
 
 		// make a fake resp to get the content
 		//func GetFileContent(ctx context.Context, file *File, resp http.ResponseWriter) ([]byte, error) {
-		content, err := shuffle.GetFileContent(ctx, file, nil)
+		content, err := GetFileContentSingul(ctx, file, nil)
 		if err != nil {
 			continue
 		}
@@ -2777,7 +2737,7 @@ func AuthenticateAppCli(appname string) error {
 
 	newAuthenticationStorage := shuffle.AppAuthenticationStorage{
 		Id: authId,
-		App: smallApp,
+		App: *smallApp,
 
 		Label: "Authentication for " + appname,
 		Active: true, 

@@ -5,6 +5,7 @@ go 1.23.0
 toolchain go1.23.9
 
 replace github.com/shuffle/shuffle-shared => ../shuffle-shared
+replace github.com/frikky/schemaless => ../schemaless
 
 require (
 	github.com/frikky/schemaless v0.0.13
