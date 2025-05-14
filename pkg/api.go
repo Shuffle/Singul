@@ -245,6 +245,15 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		resp = NewFakeResponseWriter() 
 	}
 
+	// Edgecases 
+	if value.AppName == "noapp" {
+		value.AppName = ""
+	}
+
+	if value.App == "noapp" {
+		value.AppName = ""
+	}
+
 	if len(value.AppName) == 0 && len(value.App) > 0 {
 		value.AppName = value.App
 	}
@@ -504,7 +513,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//log.Printf("[DEBUG] Found app with category %s", value.Category)
 			selectedApp = app
 			if len(selectedAction.Name) > 0 {
-				log.Printf("[DEBUG] Selected app %s (%s) with action %s", selectedApp.Name, selectedApp.ID, selectedAction.Name)
+				if debug { 
+					log.Printf("[DEBUG] Selected app %s (%s) with action %s", selectedApp.Name, selectedApp.ID, selectedAction.Name)
+				}
 
 				// FIXME: Don't break on the first one?
 				//break
@@ -1904,7 +1915,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 						continue
 					} else {
-						log.Printf("[ERROR] Problem in autocorrect (%d):\n%#v\nParams: %d", i, err, len(outputAction.Parameters))
+						if !strings.Contains(err.Error(), "missing_fields") {
+							log.Printf("[ERROR] Problem in autocorrect (%d):\n%#v\nParams: %d", i, err, len(outputAction.Parameters))
+						}
+
 						if strings.Contains(fmt.Sprintf("%s", err), "missing_fields") && strings.Contains(fmt.Sprintf("%s", err), "success") {
 							type missingFieldsStruct struct {
 								Success 	  bool `json:"success"`
@@ -2028,7 +2042,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		}
 
-		log.Printf("\n\n\n[DEBUG] Done in autocorrect loop\n\n\n")
+		if debug { 
+			log.Printf("\n\n\n[DEBUG] Done in autocorrect loop\n\n\n")
+		}
 	}
 
 	parentWorkflow.Start = secondAction.ID
