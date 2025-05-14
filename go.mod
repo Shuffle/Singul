@@ -1,16 +1,17 @@
-module singul
+module github.com/shuffle/singul
 
 go 1.23.0
 
 toolchain go1.23.9
 
-replace github.com/shuffle/shuffle-shared => ../shuffle-shared
-replace github.com/frikky/schemaless => ../schemaless
+//replace github.com/shuffle/shuffle-shared => ../shuffle-shared
+//replace github.com/frikky/schemaless => ../schemaless
 
 require (
-	github.com/frikky/schemaless v0.0.13
+	github.com/frikky/kin-openapi v0.41.0
+	github.com/frikky/schemaless v0.0.14
 	github.com/satori/go.uuid v1.2.0
-	github.com/shuffle/shuffle-shared v0.8.46
+	github.com/shuffle/shuffle-shared v0.8.53
 	github.com/spf13/cobra v1.9.1
 )
 
@@ -43,7 +44,6 @@ require (
 	github.com/emicklei/go-restful/v3 v3.11.0 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
-	github.com/frikky/kin-openapi v0.41.0 // indirect
 	github.com/ghodss/yaml v1.0.0 // indirect
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
 	github.com/go-git/go-billy/v5 v5.6.0 // indirect

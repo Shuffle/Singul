@@ -1069,6 +1069,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		step = int64(len(parentWorkflow.Actions) + 1)
 	}
 
+	// FIXME: Why are we making a second entry here again?
 	secondAction := shuffle.Action{
 		Name:        selectedAction.Name,
 		Label:       selectedAction.Name,
@@ -1239,9 +1240,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 		}
 
+		/*
 		if debug { 
 			log.Printf("[DEBUG] Not all required fields were handled (1). Missing: %#v. Should force use of all fields? Handled fields: %3v", missingFields, handledRequiredFields)
 		}
+		*/
 	}
 
 	// Send request to /api/v1/conversation with this data
@@ -1310,7 +1313,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	// Finds WHERE in the destination to put the input data
 	// Loops through input fields, then takes the data from them
 	if len(fieldFileContentMap) > 0 {
-		log.Printf("[DEBUG] Found file content map (Pre Reverse Schemaless): %#v", fieldFileContentMap)
+		/*
+		if debug { 
+			log.Printf("[DEBUG] Found file content map (Pre Reverse Schemaless): %#v", fieldFileContentMap)
+		}
+		*/
 
 		for key, mapValue := range fieldFileContentMap {
 			if _, ok := mapValue.(string); !ok {
@@ -1359,16 +1366,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						continue
 					}
 
-					if mapValue.(string) != "cool new body here 2" {
-						log.Printf("[ERROR] SKIPPING FOR NOW: %#v", mapValue)
-						continue
-					}
-
-
 					// Finds where in the body the value should be placed
 					location := strings.Join(mappedFieldSplit[1:], ".")
-
-					log.Printf("\n\n\nHandling mapping of '%s' -> '%s'\n\n\n", mapValue.(string), location)
+					//log.Printf("\n\n\nHandling mapping of '%s' -> '%s'\n\n\n", mapValue.(string), location)
 
 					outputMap := schemaless.MapValueToLocation(mapToSearch, location, mapValue.(string))
 
@@ -1381,10 +1381,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						missingFields = shuffle.RemoveFromArray(missingFields, key)
 					}
 
+					/*
 					if debug { 
-						log.Printf("OLD BODY: \n\n%s\n\nNEW BODY: \n\n%s", param.Value, string(marshalledMap))
+						log.Printf("[DEBUG] OLD BODY: \n\n%s\n\nNEW BODY: \n\n%s", param.Value, string(marshalledMap))
 					}
-
+					*/
 
 
 				} else {
@@ -1398,26 +1399,24 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					missingFields = shuffle.RemoveFromArray(missingFields, key)
 					missingFields = shuffle.RemoveFromArray(missingFields, selectedAction.Parameters[paramIndex].Name)
 
-					secondAction.Parameters = selectedAction.Parameters
 				}
-
+					
+				secondAction.Parameters = selectedAction.Parameters
 				break
 			}
 		}
 	}
-
-	os.Exit(3)
 
 	// AI fallback mechanism to handle missing fields
 	// This is in case some fields are not sent in properly
 	orgId := ""
 	authorization := ""
 	optionalExecutionId := ""
-	if debug {
-		log.Printf("\n\n\n[DEBUG] Missing fields for action: %#v\n\n\n", missingFields)
-	}
-
 	if len(missingFields) > 0 {
+		if debug {
+			log.Printf("\n\n\n[DEBUG] Missing fields for action: %#v\n\n\n", missingFields)
+		}
+
 		formattedQueryFields := []string{}
 		for _, missing := range missingFields {
 
@@ -1518,10 +1517,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		// FIXME: Make a check for IF we have filled in all fields or not
 		for paramIndex, param := range secondAction.Parameters {
-			//if param.Configuration {
-			//	continue
-			//}
-			//log.Printf("[DEBUG] Param: %s, Value: %s", param.Name, param.Value)
 			secondAction.Parameters[paramIndex].Example = ""
 			if param.Name == "headers" {
 				// for now
@@ -1581,6 +1576,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		//	log.Printf("[DEBUG][AI] Sending single API run execution to %s", apprunUrl)
 		//}
 
+		startTime := time.Now()
 		for i := 0; i < maxAttempts; i++ {
 
 			// The request that goes to the CORRECT app
@@ -1770,7 +1766,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 			if httpParseErr == nil && httpOutput.Status < 300 {
 				if debug {
-					log.Printf("[DEBUG] Found status from schemaless: %d. Should save the current fields as new base", httpOutput.Status)
+					log.Printf("[DEBUG] Found status from schemaless: %d. Saving the current fields as base. Attempts: %d, Request Time taken: %s", httpOutput.Status, i+1, time.Now().Sub(startTime))
 				}
 
 				parsedParameterMap := map[string]interface{}{}
@@ -1872,7 +1868,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						}
 					}()
 				} else {
-					log.Printf("[ERROR] Translation file already FOUND (%t) for hash: %#v. Look for file: '{root}/singul/%s'. Not creating new one.", fieldFileFound, fieldHash, discoverFile)
+					if debug { 
+						log.Printf("[WARNING] Translation file already FOUND (%t) for hash: %#v. Look for file: '{root}/singul/%s'. NOT creating new one.", fieldFileFound, fieldHash, discoverFile)
+					}
 				}
 
 			} else {
@@ -2515,7 +2513,7 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 }
 
 func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuffle.WorkflowAppAction) shuffle.WorkflowAppAction {
-	log.Printf("\n\n[DEBUG] LOADING ORG SPECIFIC PARAMETERS\n\n")
+	//log.Printf("\n\n[DEBUG] LOADING ORG SPECIFIC PARAMETERS\n\n")
 	for paramIndex, param := range action.Parameters {
 		if param.Configuration {
 			continue
@@ -2535,9 +2533,11 @@ func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuff
 
 		file, err := shuffle.GetFileSingul(ctx, fileId)
 		if err != nil || file.Status != "active" {
+			/*
 			if debug { 
 				log.Printf("[WARNING] Parameter file %s%s NOT found or not active. Status: %#v. Err: %s", shuffle.GetSingulStandaloneFilepath(), fileId, file.Status, err)
 			}
+			*/
 
 			continue
 		}
@@ -2557,7 +2557,7 @@ func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuff
 			continue
 		}
 
-		log.Printf("[INFO] Found content for file %s for action %s in app %s. Should set param.", fileId, action.Name, action.AppName)
+		//log.Printf("[INFO] Found content for file %s for action %s in app %s. Should set param.", fileId, action.Name, action.AppName)
 		//action.Parameters[paramIndex].Example = string(content)
 		action.Parameters[paramIndex].Value = string(content)
 	}

@@ -4,18 +4,22 @@ import (
 	"os"
 	//"fmt"
 	"log"
+	"errors"
 	"context"
 	"strings"
 	"github.com/spf13/cobra"
 
-	"singul/pkg"
+	//"singul/pkg"
+	"github.com/shuffle/singul/pkg"
 	"github.com/shuffle/shuffle-shared"
 )
+
+var debug = os.Getenv("DEBUG") == "true" 
 
 // Singul -> Shuffle-shared?
 // OR
 // Shuffle-shared -> Singul?
-func runSingul(args []string, flags map[string]string) {
+func runSingul(args []string, flags map[string]string) (string, error) {
 	//log.Printf("[DEBUG] Running Singul with args: %v and flags: %v\n", args, flags)
 
 	ctx := context.Background()
@@ -36,7 +40,7 @@ func runSingul(args []string, flags map[string]string) {
 
 		if key == "body" {
 			log.Printf("[ERROR] 'body' is a reserved field name. Please use 'data', 'content' or similar instead.")
-			return
+			return "", errors.New("'body' is a reserved field name")
 		}
 
 		parsedFields = append(parsedFields, shuffle.Valuereplace{
@@ -51,11 +55,20 @@ func runSingul(args []string, flags map[string]string) {
 	data, err := singul.RunAction(ctx, value)
 	if err != nil {
 		log.Printf("[ERROR] Failed running action: %v", err)
+		return data, err
 	}
 
-	log.Printf("API OUTPUT: %s", string(data))
+	log.Printf("\n\n===== API OUTPUT =====\n\n%s", string(data))
 	if err != nil { 
-		log.Printf("ERROR: %s", err.Error())
+		log.Printf("\n\n===== ERROR =====\n\n%s\n\n", err.Error())
+	}
+
+	return string(data), nil
+}
+
+func init() {
+	if os.Getenv("DEBUG") == "true" {
+		debug = true
 	}
 }
 
