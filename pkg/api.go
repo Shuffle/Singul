@@ -581,6 +581,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	fieldHash := ""
 	fieldFileFound := false
 	fieldFileContentMap := map[string]interface{}{}
+
+	discoverFile := ""
 	if len(value.Fields) > 0 {
 		sortedKeys := []string{}
 		for _, field := range value.Fields {
@@ -603,7 +605,12 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		// Md5 based on sortedKeys. Could subhash key search work?
 		mappedString := fmt.Sprintf("%s %s-%s", selectedApp.ID, value.Label, strings.Join(sortedKeys, ""))
 		fieldHash = fmt.Sprintf("%x", md5.Sum([]byte(mappedString)))
-		discoverFile := fmt.Sprintf("file_%s", fieldHash)
+		discoverFile = fmt.Sprintf("file_%s", fieldHash)
+
+		// Ensuring location is proper during load
+		if standalone {
+			discoverFile = fmt.Sprintf("translation_output/%s", discoverFile)
+		}
 
 		if debug {
 			log.Printf("[DEBUG] Loading content mapping for fields '%s' with hash '%s'. Filepath: '%s'", strings.Join(sortedKeys, ","), fieldHash, discoverFile)
@@ -611,7 +618,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		file, err := shuffle.GetFileSingul(ctx, discoverFile)
 		if err != nil {
-			log.Printf("[ERROR] Problem with getting file '%s' in category action autorun: %s", discoverFile, err)
+			if debug {
+				log.Printf("[ERROR] Problem with getting field file '%s' in category action autorun: %s", discoverFile, err)
+			}
 		} else {
 			//log.Printf("[DEBUG] Found translation file in category action: %#v. Status: %s. Category: %s", file.Id, file.Status, file.Namespace)
 
@@ -728,17 +737,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	// FIXME: Check if ALL fields for the target app can be fullfiled
 	// E.g. for Jira: Org_id is required.
-
-	/*
-		if foundFields != len(baseFields) {
-			log.Printf("[WARNING] Not all required fields were found in category action. Want: %#v, have: %#v", baseFields, value.Fields)
-
-			resp.WriteHeader(400)
-			resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Not all required fields are set. This can be autocompleted from fields you fille in", "label": "%s", "missing_fields": "%s"}`, value.Label, strings.Join(missingFields, ","))))
-			return
-
-		}
-	*/
 	_ = baseFields
 
 	/*
@@ -1241,7 +1239,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 		}
 
-		log.Printf("[WARNING] Not all required fields were handled (1). Missing: %#v. Should force use of all fields? Handled fields: %3v", missingFields, handledRequiredFields)
+		if debug { 
+			log.Printf("[DEBUG] Not all required fields were handled (1). Missing: %#v. Should force use of all fields? Handled fields: %3v", missingFields, handledRequiredFields)
+		}
 	}
 
 	// Send request to /api/v1/conversation with this data
@@ -1275,7 +1275,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		// Remove newlines
 		fixedBody = strings.ReplaceAll(fixedBody, "\n", "")
 
-		log.Printf("[DEBUG] GOT BODY: %#v", fixedBody)
+		if debug { 
+			log.Printf("[DEBUG] GOT BODY: %#v", fixedBody)
+		}
+
 		if len(fixedBody) > 0 {
 			bodyFound := false
 			for paramIndex, param := range selectedAction.Parameters {
@@ -1337,8 +1340,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					continue
 				}
 
-				//log.Printf("[DEBUG] Found matching param %s with value %+v", param.Name, mappedFieldSplit)
-
 				foundIndex = paramIndex
 				if param.Name == "queries" {
 					if len(param.Value) == 0 {
@@ -1348,24 +1349,31 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					}
 
 					missingFields = shuffle.RemoveFromArray(missingFields, key)
+
+
 				} else if param.Name == "body" {
-					//log.Printf("\n\n\n[DEBUG] Found body field for file content: %s. Location: %#v, Value: %#v\n\n\n", key, strings.Join(mappedFieldSplit, "."), mapValue)
-
-					newBody := param.Value
-
 					mapToSearch := map[string]interface{}{}
-					err := json.Unmarshal([]byte(newBody), &mapToSearch)
+					err := json.Unmarshal([]byte(param.Value), &mapToSearch)
 					if err != nil {
-						log.Printf("[ERROR] Failed unmarshalling body for file content: %s. Body: %#v", err, string(newBody))
+						log.Printf("[ERROR] Failed unmarshalling body for file content: %s. Body: %#v", err, string(param.Value))
 						continue
 					}
 
+					if mapValue.(string) != "cool new body here 2" {
+						log.Printf("[ERROR] SKIPPING FOR NOW: %#v", mapValue)
+						continue
+					}
+
+
 					// Finds where in the body the value should be placed
 					location := strings.Join(mappedFieldSplit[1:], ".")
+
+					log.Printf("\n\n\nHandling mapping of '%s' -> '%s'\n\n\n", mapValue.(string), location)
+
 					outputMap := schemaless.MapValueToLocation(mapToSearch, location, mapValue.(string))
 
 					// Marshal back to JSON
-					marshalledMap, err := json.Marshal(outputMap)
+					marshalledMap, err := json.MarshalIndent(outputMap, "", "    ")
 					if err != nil {
 						log.Printf("[WARNING] Failed marshalling body for file content: %s", err)
 					} else {
@@ -1373,7 +1381,12 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						missingFields = shuffle.RemoveFromArray(missingFields, key)
 					}
 
-					log.Printf("NEW BODY: %#v", string(marshalledMap))
+					if debug { 
+						log.Printf("OLD BODY: \n\n%s\n\nNEW BODY: \n\n%s", param.Value, string(marshalledMap))
+					}
+
+
+
 				} else {
 					// Hmm
 					selectedAction.Parameters[paramIndex].Value = mapValue.(string)
@@ -1392,6 +1405,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 		}
 	}
+
+	os.Exit(3)
 
 	// AI fallback mechanism to handle missing fields
 	// This is in case some fields are not sent in properly
@@ -1776,8 +1791,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						parsedParameterMap[param.Name] = param.Value
 					}
 
-					// FIXME: Skipping anything but body for now
 					if param.Name != "body" {
+						if debug { 
+							log.Printf("[DEBUG] Skipping parameter save for '%s' (FOR NOW). Focusing ONLY on body field.", param.Name)
+						}
+
 						continue
 					}
 
@@ -1796,7 +1814,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 					// Finds location of some data in another part of the data. This is to have a predefined location in subsequent requests
 					// Allows us to map text -> field and not just field -> text (2-way)
-
 					go func() {
 						reversed, err := schemaless.ReverseTranslate(parsedParameterMap, inputFieldMap)
 						if err != nil {
@@ -1855,7 +1872,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						}
 					}()
 				} else {
-					log.Printf("[ERROR] fieldfile NOT found for hash: %#v", fieldHash)
+					log.Printf("[ERROR] Translation file already FOUND (%t) for hash: %#v. Look for file: '{root}/singul/%s'. Not creating new one.", fieldFileFound, fieldHash, discoverFile)
 				}
 
 			} else {
@@ -2498,7 +2515,7 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 }
 
 func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuffle.WorkflowAppAction) shuffle.WorkflowAppAction {
-	log.Printf("\n\n\n\n")
+	log.Printf("\n\n[DEBUG] LOADING ORG SPECIFIC PARAMETERS\n\n")
 	for paramIndex, param := range action.Parameters {
 		if param.Configuration {
 			continue
@@ -2510,30 +2527,18 @@ func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuff
 
 		fileId := fmt.Sprintf("file_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(action.Name), " ", "_", -1), strings.ToLower(param.Name))
 
-		if standalone { 
-			// Look for the file and read it locally
-			fullPath := fmt.Sprintf("%s/action_parameters/%s", basepath, fileId)
-			fileinfo, err := os.Open(fullPath)
-			if err != nil {
-				continue
-			}
-
-			defer fileinfo.Close()
-			content, err := ioutil.ReadAll(fileinfo)
-			if err != nil {
-				continue
-			}
-
-			if len(content) > 5 {
-				action.Parameters[paramIndex].Example = string(content)
-			}
-
-			continue
-		} 
+		// Ensures we load from the correct folder
+		if standalone {
+			fileId = fmt.Sprintf("file_parameter_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(action.Name), " ", "_", -1), strings.ToLower(param.Name))
+			fileId = fmt.Sprintf("app_defaults/%s", fileId)
+		}
 
 		file, err := shuffle.GetFileSingul(ctx, fileId)
 		if err != nil || file.Status != "active" {
-			log.Printf("[WARNING] File %s NOT found or not active. Status: %#v. Err: %s", fileId, file.Status, err)
+			if debug { 
+				log.Printf("[WARNING] Parameter file %s%s NOT found or not active. Status: %#v. Err: %s", shuffle.GetSingulStandaloneFilepath(), fileId, file.Status, err)
+			}
+
 			continue
 		}
 
@@ -2552,10 +2557,9 @@ func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuff
 			continue
 		}
 
-		// log.Printf("[DEBUG] content it got and is putting into example: %s - %d", string(content), paramIndex)
-
-		//log.Printf("[INFO] Found content for file %s for action %s in app %s. Should set param.", fileId, action.Name, action.AppName)
-		action.Parameters[paramIndex].Example = string(content)
+		log.Printf("[INFO] Found content for file %s for action %s in app %s. Should set param.", fileId, action.Name, action.AppName)
+		//action.Parameters[paramIndex].Example = string(content)
+		action.Parameters[paramIndex].Value = string(content)
 	}
 
 	return action
