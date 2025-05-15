@@ -20,7 +20,6 @@ import (
 
 	uuid "github.com/satori/go.uuid"
 
-
 	"github.com/frikky/schemaless"
 	"github.com/shuffle/shuffle-shared"
 	"github.com/frikky/kin-openapi/openapi3"

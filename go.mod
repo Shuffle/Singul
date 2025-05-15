@@ -4,8 +4,9 @@ go 1.23.0
 
 toolchain go1.23.9
 
-//replace github.com/shuffle/shuffle-shared => ../shuffle-shared
-//replace github.com/frikky/schemaless => ../schemaless
+replace github.com/shuffle/shuffle-shared => ../shuffle-shared
+
+replace github.com/frikky/schemaless => ../schemaless
 
 require (
 	github.com/frikky/kin-openapi v0.41.0
@@ -82,7 +83,7 @@ require (
 	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
 	github.com/pjbgf/sha1cd v0.3.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/sashabaranov/go-openai v1.19.2 // indirect
+	github.com/sashabaranov/go-openai v1.40.0 // indirect
 	github.com/sendgrid/rest v2.6.9+incompatible // indirect
 	github.com/sendgrid/sendgrid-go v3.14.0+incompatible // indirect
 	github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3 // indirect

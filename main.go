@@ -58,9 +58,9 @@ func runSingul(args []string, flags map[string]string) (string, error) {
 		return data, err
 	}
 
-	log.Printf("\n\n===== API OUTPUT =====\n\n%s", string(data))
+	log.Printf("\n\n===== API OUTPUT =====\n\n%s\n\n", string(data))
 	if err != nil { 
-		log.Printf("\n\n===== ERROR =====\n\n%s\n\n", err.Error())
+		log.Printf("===== ERROR =====\n\n%s\n\n", err.Error())
 	}
 
 	return string(data), nil
