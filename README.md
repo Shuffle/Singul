@@ -19,39 +19,33 @@ APIs and AI Agents should be easier to use and build. Singul solves both by bein
 - It has a source of truth for APIs, and is not guessing
 
 **Reliable Translations:**
-- For your input, we store the format and know how to translate it after the first request
-- For the output, we store the format and know how to translate it after the first request
+- For your input AND output, we store the format and know how to translate it after successful requests. This is then reusable in subsequent requests
+
+**Stable Connections & stored authentication:**
+- Singul is based on how we built [Shuffle](https://shuffler.io) and how we connect to APIs. We use the knowledge of Shuffle, including apps, categories, tags, actions, authentication mechanisms, code and more. 
 
 ## Usage
 CLI
 ```
 singul --help
 singul list_tickets jira 
-singul send_mail outlook --subject="hoy"
+singul send_mail outlook --subject="hoy" --data="hello world" --to="test@example.com"
 ```
 
-Code (python)
+Code (python): Local OR Remote
 ```
 import singul
 singul.send_mail("gmail", subject="hoy")
 tickets = singul.list_tickets("jira")
 ```
 
-API
+API: singul.io API
 ```
 curl https://singul.io/api/send_mail -d '{"app": "gmail", "subject": "hoy"}'
 curl https://singul.io/api/list_tickets -d '{"app": "jira"}'
 ```
 
-## Distributed usage
-Available in the following ways:
-- Local CLI
--  
-
-## Storage
-The following data type is stored with Singul during usage
-- Authentication 
-- Translation files
-
-## How we use it at Shuffle
-- In workflows 
+## Local Example
+```
+go run *.go create_ticket jira --project=SHUF --title="title2" --content="cool new body here 2"
+```
