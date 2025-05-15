@@ -2687,7 +2687,10 @@ func GetLocalAuth() ([]shuffle.AppAuthenticationStorage, error) {
 	filePath := fmt.Sprintf("%s/auth", basepath)
 	files, err := os.ReadDir(filePath)
 	if err != nil {
-		log.Printf("[ERROR] Failed reading auth directory: %s", err)
+		if debug { 
+			log.Printf("[ERROR] Failed reading auth directory: %s", err)
+		}
+
 		return allAuth, err
 	}
 
@@ -2739,20 +2742,10 @@ func AuthenticateAppCli(appname string) error {
 		return errors.New("No authentication fields found")
 	}
 
-	//log.Printf("[DEBUG] Authentication fields: %#v", app.Authentication.Parameters)
-
 	authId := uuid.NewV4().String()
-
-	smallApp := app
-	smallApp.SmallImage = ""
-	smallApp.LargeImage = ""
-	smallApp.ChildIds = []string{}
-	smallApp.Authentication = shuffle.Authentication{} 
-	smallApp.Actions = []shuffle.WorkflowAppAction{}
-
 	newAuthenticationStorage := shuffle.AppAuthenticationStorage{
 		Id: authId,
-		App: *smallApp,
+		App: *app,
 
 		Label: "Authentication for " + appname,
 		Active: true, 
@@ -2763,13 +2756,48 @@ func AuthenticateAppCli(appname string) error {
 		Encrypted: false,
 	}
 
-	log.Printf("[DEBUG] Input your fields for authentication for app %s", appname)
+	if len(app.Authentication.Parameters) == 0 {
+		keysFound := []string{}
+		authParams := []shuffle.AuthenticationParams{}
+		for _, action := range app.Actions {
+			for _, param := range action.Parameters {
+				if !param.Configuration {
+					continue
+				}
+
+				if shuffle.ArrayContains(keysFound, param.Name) {
+					continue
+				}
+
+				keysFound = append(keysFound, param.Name)
+				authParams = append(authParams, shuffle.AuthenticationParams{
+					Name:  param.Name,
+				})
+			}
+		}
+
+		if len(authParams) > 0 {
+			app.Authentication.Parameters = authParams
+		}
+	}
+
+	log.Printf("[DEBUG] Input your fields for authentication for app %s. Fields: %d. You may always edit this in the ./auth folder later, where they will be stored.", appname, len(app.Authentication.Parameters))
+
+	keysEncrypted := false
 	for _, param := range app.Authentication.Parameters {
-		//log.Printf("[DEBUG] Found parameter %s: %s", param.Name, param.Value)
+		if debug { 
+			log.Printf("[DEBUG] Found parameter %s: %s", param.Name, param.Value)
+		}
 
 		// Scanf to get input for each field
 		scan := bufio.NewScanner(os.Stdin)
-		fmt.Printf("Enter value for %s (%s): ", param.Name, param.Value)
+
+		paramName := param.Name
+		if strings.HasSuffix(paramName, "_basic") {
+			paramName = strings.Replace(paramName, "_basic", "", -1)
+		}
+
+		fmt.Printf("Enter value for %s (%s): ", paramName, param.Value)
 		scan.Scan()
 
 		input := scan.Text()
@@ -2784,13 +2812,28 @@ func AuthenticateAppCli(appname string) error {
 			}
 		}
 
+		passphrase := fmt.Sprintf("%s-%s", app.ID, param.Name)
+		encryptedValue, err := shuffle.HandleKeyEncryption([]byte(input), passphrase) 
+		if err == nil {
+			keysEncrypted = true
+		} else {
+			encryptedValue = []byte(input)
+		}
+
 		field := shuffle.AuthenticationStore{
 			Key:  param.Name,
-			Value: input,
+			Value: string(encryptedValue),
 		}
 
 		newAuthenticationStorage.Fields = append(newAuthenticationStorage.Fields, field)
 	}
+
+	newAuthenticationStorage.App.SmallImage = ""
+	newAuthenticationStorage.App.LargeImage = ""
+	newAuthenticationStorage.App.ChildIds = []string{}
+	newAuthenticationStorage.App.Authentication = shuffle.Authentication{} 
+	newAuthenticationStorage.App.Actions = []shuffle.WorkflowAppAction{}
+	newAuthenticationStorage.Encrypted = keysEncrypted
 
 	// Generate a uuid for the authentication
 	// Then write it to file.json with that name 
