@@ -1443,6 +1443,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 
 		formattedQuery := fmt.Sprintf("Use the fields '%s' with app %s to '%s'.", strings.Join(formattedQueryFields, "&"), strings.ReplaceAll(selectedApp.Name, "_", " "), strings.ReplaceAll(value.Label, "_", " "))
+
 		newQueryInput := shuffle.QueryInput{
 			Query:        formattedQuery,
 			//OutputFormat: "action", 		   // To run the action (?)
@@ -1889,8 +1890,15 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					// apprunBody: the response body we got back from the app
 					// additionalInfo: recursively filled in from this function 
 					// inputQuery: the input we got initially
-					outputString, outputAction, err, additionalInfo := shuffle.FindNextApiStep(secondAction, apprunBody, additionalInfo, inputQuery, originalAppname)
+					outputString, outputAction, err, additionalInfo := shuffle.FindNextApiStep(
+						secondAction, 
+						apprunBody, 
+						additionalInfo, 
+						inputQuery, 
+						originalAppname, 
 
+						i+1,
+					)
 					if debug {
 						log.Printf("[DEBUG]\n==== AUTOCORRECT ====\nOUTPUTSTRING: %s\nADDITIONALINFO: %s", outputString, additionalInfo)
 					}
@@ -1912,9 +1920,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 						continue
 					} else {
-						if !strings.Contains(err.Error(), "missing_fields") {
-							log.Printf("[ERROR] Problem in autocorrect (%d):\n%#v\nParams: %d", i, err, len(outputAction.Parameters))
-						}
 
 						if strings.Contains(fmt.Sprintf("%s", err), "missing_fields") && strings.Contains(fmt.Sprintf("%s", err), "success") {
 							type missingFieldsStruct struct {
@@ -1936,6 +1941,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 							}
 
 							// Try to 
+						} else {
+							log.Printf("[ERROR] Problem in autocorrect (%d):\n%#v\nParams: %d", i, err, len(outputAction.Parameters))
 						}
 
 						if i < maxAttempts-1 {
