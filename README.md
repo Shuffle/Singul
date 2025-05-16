@@ -20,6 +20,7 @@ APIs and AI Agents should be easier to use and build. Singul solves both by bein
 
 **Reliable Translations:**
 - For your input AND output, we store the format and know how to translate it after successful requests. This is then reusable in subsequent requests
+- Singul ensures all input fields ARE in the request, or fails out. You can modify the relevant files to update the body you want to send if this occurs after up to 5 request failures.
 
 **Stable Connections & stored authentication:**
 - Singul is based on how we built [Shuffle](https://shuffler.io) and how we connect to APIs. We use the knowledge of Shuffle, including apps, categories, tags, actions, authentication mechanisms, code and more. 

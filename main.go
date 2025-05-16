@@ -2,8 +2,9 @@ package main
 
 import (
 	"os"
-	//"fmt"
+	"fmt"
 	"log"
+	"time"
 	"errors"
 	"context"
 	"strings"
@@ -52,15 +53,22 @@ func runSingul(args []string, flags map[string]string) (string, error) {
 	value.Fields = parsedFields
 
 	// Make a fake ResponseWrite that can actaully receive data
+	startTime := time.Now()
+	log.Printf("[INFO] Starting request handling with %d parameters", len(value.Fields))
 	data, err := singul.RunAction(ctx, value)
 	if err != nil {
 		log.Printf("[ERROR] Failed running action: %v", err)
 		return data, err
 	}
 
-	log.Printf("\n\n===== API OUTPUT =====\n\n%s\n\n", string(data))
+	endTime := time.Now()
+	if debug { 
+		log.Printf("[DEBUG] Time taken: %v", endTime.Sub(startTime))
+	}
+
+	fmt.Printf("\n\n===== API OUTPUT =====\n\n%s\n\n", string(data))
 	if err != nil { 
-		log.Printf("===== ERROR =====\n\n%s\n\n", err.Error())
+		fmt.Printf("===== ERROR =====\n\n%s\n\n", err.Error())
 	}
 
 	return string(data), nil

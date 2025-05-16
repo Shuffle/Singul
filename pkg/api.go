@@ -1323,11 +1323,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	// Finds WHERE in the destination to put the input data
 	// Loops through input fields, then takes the data from them
 	if len(fieldFileContentMap) > 0 {
-		/*
 		if debug { 
 			log.Printf("[DEBUG] Found file content map (Pre Reverse Schemaless): %#v", fieldFileContentMap)
 		}
-		*/
 
 		for key, mapValue := range fieldFileContentMap {
 			if _, ok := mapValue.(string); !ok {
@@ -1424,8 +1422,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	optionalExecutionId := ""
 	if len(missingFields) > 0 {
 		if debug {
-			log.Printf("\n\n\n[DEBUG] Missing fields for action: %#v\n\n\n", missingFields)
+			log.Printf("[DEBUG] Missing fields for action: %#v. This means the current translation may be missing or wrong. Setting fieldFileFound back to false and re-setting it at the end", missingFields)
 		}
+
+		fieldFileFound = false  
 
 		formattedQueryFields := []string{}
 		for _, missing := range missingFields {
@@ -1586,116 +1586,146 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		//	log.Printf("[DEBUG][AI] Sending single API run execution to %s", apprunUrl)
 		//}
 
+		marshalledBody := []byte(`{"success": false, "reason": "Action didn't run yet. This is pre-validation."}`)
+		httpOutput := shuffle.HTTPOutput{
+			Success: false,
+			Status: 400,
+		}
+		httpParseErr := errors.New("Starting error with no status: ")
 		startTime := time.Now()
+
+		// The request that goes to the CORRECT app
+		// SubflowData{} -> HTTPOutput in .Result
+
+		apprunBody := []byte("{\"success\": true,\"result\": \"{\\\"success\\\": true,\\\"status\\\": 400, \\\"body\\\": \\\"Not all fields have been filled. Ensure the below are inputted in the right field, in the right format.\\\\n")
 		for i := 0; i < maxAttempts; i++ {
 
-			// The request that goes to the CORRECT app
-			apprunBody := []byte{}
-			if standalone { 
-				unmarshalledAction := shuffle.Action{}
-				err = json.Unmarshal(preparedAction, &unmarshalledAction)
-				if err != nil {
-					log.Printf("[ERROR] Failed unmarshalling action in category run for app %s: %s", secondAction.AppID, err)
+			// This is an autocorrective measure to ensure ALL fields
+			// have been filled in according to the input from the user.
+			// This can be disabled with the environment variable:
+			// SKIP_VALIDATION=true
+			missingBodyParams := validatePreparedActionHasFields(preparedAction, value.Fields)
+			if len(missingBodyParams) > 0 {
+				fieldFileFound = false
+				allMissingFields := []string{}
+
+				for key, value := range missingBodyParams {
+					allMissingFields = append(allMissingFields, key)
+
+					apprunBody = []byte(fmt.Sprintf("%s%s=%s\\\\n", string(apprunBody), key, value))
+
 				}
 
-				parentWorkflow.Actions = []shuffle.Action{
-					unmarshalledAction,
-				}
+				log.Printf("[ERROR] Problem with missing fields: %#v. This means you MAY get the wrong outcome. Rerunning translations to ensure all fields are included.", strings.Join(allMissingFields, ","))
 
-				unparsedBody, err := handleStandaloneExecution(parentWorkflow)
-				if err != nil {
-					log.Printf("[ERROR] Failed running standalone execution: %s", err)
-				}
-
-				// This is the format used in subflow executions, so we just pretend to be the same
-				preparedResponse := shuffle.SubflowData{
-					Success: 	 true,
-					Result: 	 string(unparsedBody),
-					ResultSet: true, 
-				}
-
-				apprunBody, err = json.Marshal(preparedResponse)
-				if err != nil {
-					log.Printf("[ERROR] Failed marshalling response for standalone execution: %s", err)
-				}
-
+				apprunBody = []byte(fmt.Sprintf("%s\\\"}\"}", apprunBody))
 
 			} else {
-				// Sends back how many translations happened
-				// -url is just for the app to parse it :(
-				attemptString := "x-translation-attempt-url"
-				if _, ok := resp.Header()[attemptString]; ok {
-					resp.Header().Set(attemptString, fmt.Sprintf("%d", i+1))
-				} else {
-					resp.Header().Add(attemptString, fmt.Sprintf("%d", i+1))
-				}
-
-				//log.Printf("[DEBUG] Attempt preparedAction: %s", string(preparedAction))
-
-				req, err := http.NewRequest(
-					"POST",
-					apprunUrl,
-					bytes.NewBuffer(preparedAction),
-				)
-
-				if err != nil {
-					log.Printf("[WARNING] Error in new request for execute generated app run: %s", err)
-					respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed preparing new request. Contact support."}`))
-					resp.WriteHeader(500)
-					resp.Write(respBody)
-					return respBody, err
-				}
-
-				for key, value := range request.Header {
-					if len(value) == 0 {
-						continue
+				if standalone { 
+					unmarshalledAction := shuffle.Action{}
+					err = json.Unmarshal(preparedAction, &unmarshalledAction)
+					if err != nil {
+						log.Printf("[ERROR] Failed unmarshalling action in category run for app %s: %s", secondAction.AppID, err)
 					}
 
-					req.Header.Add(key, value[0])
-				}
+					parentWorkflow.Actions = []shuffle.Action{
+						unmarshalledAction,
+					}
 
-				newresp, err := client.Do(req)
-				if err != nil {
-					log.Printf("[WARNING] Error running body for execute generated app run: %s", err)
-					respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running generated app. Contact support."}`))
-					resp.WriteHeader(500)
-					resp.Write(respBody)
-					return respBody, err
-				}
+					unparsedBody, err := handleStandaloneExecution(parentWorkflow)
+					if err != nil {
+						log.Printf("[ERROR] Failed running standalone execution: %s", err)
+					}
 
-				// Ensures frontend has something to debug if things go wrong
-				for key, value := range newresp.Header {
-					if strings.HasSuffix(strings.ToLower(key), "-url") {
+					// This is the format used in subflow executions, so we just pretend to be the same
+					preparedResponse := shuffle.SubflowData{
+						Success: 	 true,
+						Result: 	 string(unparsedBody),
+						ResultSet: true, 
+					}
 
-						// Remove old ones with the same key
-						if _, ok := resp.Header()[key]; ok {
-							resp.Header().Set(key, value[0])
-						} else {
-							resp.Header().Add(key, value[0])
+					apprunBody, err = json.Marshal(preparedResponse)
+					if err != nil {
+						log.Printf("[ERROR] Failed marshalling response for standalone execution: %s", err)
+					}
+
+
+				} else {
+					// Sends back how many translations happened
+					// -url is just for the app to parse it :(
+					attemptString := "x-translation-attempt-url"
+					if _, ok := resp.Header()[attemptString]; ok {
+						resp.Header().Set(attemptString, fmt.Sprintf("%d", i+1))
+					} else {
+						resp.Header().Add(attemptString, fmt.Sprintf("%d", i+1))
+					}
+
+					//log.Printf("[DEBUG] Attempt preparedAction: %s", string(preparedAction))
+
+					req, err := http.NewRequest(
+						"POST",
+						apprunUrl,
+						bytes.NewBuffer(preparedAction),
+					)
+
+					if err != nil {
+						log.Printf("[WARNING] Error in new request for execute generated app run (1): %s", err)
+						respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed preparing new request. Contact support."}`))
+						resp.WriteHeader(500)
+						resp.Write(respBody)
+						return respBody, err
+					}
+
+					for key, value := range request.Header {
+						if len(value) == 0 {
+							continue
+						}
+
+						req.Header.Add(key, value[0])
+					}
+
+					newresp, err := client.Do(req)
+					if err != nil {
+						log.Printf("[WARNING] Error running body for execute generated app run (2): %s", err)
+						respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running generated app. Contact support."}`))
+						resp.WriteHeader(500)
+						resp.Write(respBody)
+						return respBody, err
+					}
+
+					// Ensures frontend has something to debug if things go wrong
+					for key, value := range newresp.Header {
+						if strings.HasSuffix(strings.ToLower(key), "-url") {
+
+							// Remove old ones with the same key
+							if _, ok := resp.Header()[key]; ok {
+								resp.Header().Set(key, value[0])
+							} else {
+								resp.Header().Add(key, value[0])
+							}
 						}
 					}
-				}
 
-				defer newresp.Body.Close()
-				apprunBody, err = ioutil.ReadAll(newresp.Body)
-				if err != nil {
-					log.Printf("[WARNING] Failed reading body for execute generated app run: %s", err)
-					respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed unmarshalling app response. Contact support."}`))
-					resp.WriteHeader(500)
-					resp.Write(respBody)
-					return respBody, err
+					defer newresp.Body.Close()
+					apprunBody, err = ioutil.ReadAll(newresp.Body)
+					if err != nil {
+						log.Printf("[WARNING] Failed reading body for execute generated app run (3): %s", err)
+						respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed unmarshalling app response. Contact support."}`))
+						resp.WriteHeader(500)
+						resp.Write(respBody)
+						return respBody, err
+					}
 				}
 			}
 
-			// Parse success struct
+			// Parse success struct. This JUST checks success.
 			successStruct := shuffle.ResultChecker{}
 			unmarshallErr := json.Unmarshal(apprunBody, &successStruct)
 			if unmarshallErr != nil {
-				log.Printf("[WARNING] Failed unmarshalling body for execute generated app run: %s", err)
+				log.Printf("[WARNING] Failed unmarshalling body for execute generated app run (4): %s", err)
 			}
 
-
-			httpOutput, marshalledBody, httpParseErr := shuffle.FindHttpBody(apprunBody)
+			httpOutput, marshalledBody, httpParseErr = shuffle.FindHttpBody(apprunBody)
 			//log.Printf("\n\nGOT RESPONSE (%d): %s. STATUS: %d\n\n",  newresp.StatusCode, string(apprunBody), httpOutput.Status)
 			if successStruct.Success == false && len(successStruct.Reason) > 0 && httpOutput.Status == 0 && strings.Contains(strings.ReplaceAll(string(apprunBody), " ", ""), `"success":false`) {
 				log.Printf("[WARNING][AI] Failed running app %s (%s). Contact support. Reason: %s", selectedAction.Name, selectedAction.AppID, successStruct.Reason)
@@ -1720,22 +1750,24 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				URL:    httpOutput.Url,
 			}
 
-			for _, param := range secondAction.Parameters {
-				if param.Name == "body" && len(param.Value) > 0 {
-					translatedBodyString := "x-translated-body-url"
-					if _, ok := resp.Header()[translatedBodyString]; ok {
-						resp.Header().Set(translatedBodyString, param.Value)
-					} else {
-						resp.Header().Add(translatedBodyString, param.Value)
+			if !standalone { 
+				for _, param := range secondAction.Parameters {
+					if param.Name == "body" && len(param.Value) > 0 {
+						translatedBodyString := "x-translated-body-url"
+						if _, ok := resp.Header()[translatedBodyString]; ok {
+							resp.Header().Set(translatedBodyString, param.Value)
+						} else {
+							resp.Header().Add(translatedBodyString, param.Value)
+						}
 					}
-				}
 
-				if param.Name == "queries" && len(param.Value) > 0 {
-					translatedQueryString := "x-translated-query-url"
-					if _, ok := resp.Header()[translatedQueryString]; ok {
-						resp.Header().Set(translatedQueryString, param.Value)
-					} else {
-						resp.Header().Add(translatedQueryString, param.Value)
+					if param.Name == "queries" && len(param.Value) > 0 {
+						translatedQueryString := "x-translated-query-url"
+						if _, ok := resp.Header()[translatedQueryString]; ok {
+							resp.Header().Set(translatedQueryString, param.Value)
+						} else {
+							resp.Header().Add(translatedQueryString, param.Value)
+						}
 					}
 				}
 			}
@@ -1781,6 +1813,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 				parsedParameterMap := map[string]interface{}{}
 				for _, param := range secondAction.Parameters {
+					if param.Configuration {
+						continue
+					}
+
+					if len(param.Value) == 0 {
+						continue
+					}
+
 					if strings.Contains(param.Value, "&") && strings.Contains(param.Value, "=") {
 						// Split by & and then by =
 						parsedParameterMap[param.Name] = map[string]interface{}{}
@@ -1797,6 +1837,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						parsedParameterMap[param.Name] = param.Value
 					}
 
+					/*
 					if param.Name != "body" {
 						if debug { 
 							log.Printf("[DEBUG] Skipping parameter save for '%s' (FOR NOW). Focusing ONLY on body field.", param.Name)
@@ -1804,12 +1845,13 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 						continue
 					}
+					*/
 
-					go shuffle.UploadParameterBase(context.Background(), user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, param.Name, param.Value)
-					//err = uploadParameterBase(ctx, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, param.Name, param.Value)
-					//if err != nil {
-					//	log.Printf("[WARNING] Failed uploading parameter base for %s: %s", param.Name, err)
-					//}
+					if standalone { 
+						shuffle.UploadParameterBase(context.Background(), user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, param.Name, param.Value)
+					} else {
+						go shuffle.UploadParameterBase(context.Background(), user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, param.Name, param.Value)
+					}
 				}
 
 				if len(fieldHash) > 0 && fieldFileFound == false {
@@ -1820,63 +1862,13 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 					// Finds location of some data in another part of the data. This is to have a predefined location in subsequent requests
 					// Allows us to map text -> field and not just field -> text (2-way)
-					go func() {
-						reversed, err := schemaless.ReverseTranslate(parsedParameterMap, inputFieldMap)
-						if err != nil {
-							log.Printf("[ERROR] Problem with reversing: %s", err)
-						} else {
-							log.Printf("[DEBUG] Raw reverse: %s", reversed)
 
-							finishedFields := 0
-							mappedFields := map[string]interface{}{}
-							err = json.Unmarshal([]byte(reversed), &mappedFields)
-							if err == nil {
-								for _, value := range mappedFields {
-									if _, ok := value.(string); ok && len(value.(string)) > 0 {
-										finishedFields++
-									} else {
-										log.Printf("[DEBUG] Found non-string value: %#v", value)
-									}
-								}
-							}
-
-							log.Printf("Reversed fields (%d): %s", finishedFields, reversed)
-							if finishedFields == 0 {
-							} else {
-
-								timeNow := time.Now().Unix()
-
-								fileId := fmt.Sprintf("file_%s", fieldHash)
-								encryptionKey := fmt.Sprintf("%s_%s", user.ActiveOrg.Id, fileId)
-								folderPath := fmt.Sprintf("%s/%s/%s", basepath, user.ActiveOrg.Id, "global")
-								downloadPath := fmt.Sprintf("%s/%s", folderPath, fileId)
-								file := &shuffle.File{
-									Id:           fileId,
-									CreatedAt:    timeNow,
-									UpdatedAt:    timeNow,
-									Description:  "",
-									Status:       "active",
-									Filename:     fmt.Sprintf("%s.json", fieldHash),
-									OrgId:        user.ActiveOrg.Id,
-									WorkflowId:   "global",
-									DownloadPath: downloadPath,
-									Subflows:     []string{},
-									StorageArea:  "local",
-									Namespace:    "translation_output",
-									Tags: []string{
-										"autocomplete",
-									},
-								}
-
-								returnedId, err := shuffle.UploadFileSingul(context.Background(), file, encryptionKey, []byte(reversed))
-								if err != nil {
-									log.Printf("[ERROR] Problem uploading file: %s", err)
-								} else {
-									log.Printf("[DEBUG] Uploaded file with ID: %s", returnedId)
-								}
-							}
-						}
-					}()
+					// Had to remove goroutine for standalone as it sometimes finished too fast and didn't have time to save
+					if standalone { 
+						StoreTranslationOutput(user, fieldHash, parsedParameterMap, inputFieldMap) 
+					} else {
+						go StoreTranslationOutput(user, fieldHash, parsedParameterMap, inputFieldMap) 
+					}
 				} else {
 					if debug { 
 						log.Printf("[WARNING] Translation file already FOUND (%t) for hash: %#v. Look for file: '{root}/singul/%s'. NOT creating new one.", fieldFileFound, fieldHash, discoverFile)
@@ -1886,11 +1878,17 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			} else {
 				// Parses out data from the output
 				// Reruns the app with the new parameters
+				log.Printf("\n\nHERE: %#v\n\n", httpParseErr)
 				if strings.Contains(strings.ToLower(fmt.Sprintf("%s", httpParseErr)), "status: ") {
 					if debug {
 						log.Printf("[DEBUG] Found status code in schemaless error: %s", httpParseErr)
 					}
 
+					// Passing in:
+					// secondAction: the action we've prepared 
+					// apprunBody: the response body we got back from the app
+					// additionalInfo: recursively filled in from this function 
+					// inputQuery: the input we got initially
 					outputString, outputAction, err, additionalInfo := shuffle.FindNextApiStep(secondAction, apprunBody, additionalInfo, inputQuery, originalAppname)
 
 					if debug {
@@ -2282,6 +2280,130 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	resp.Write(jsonParsed)
 	return jsonParsed, nil
 }
+
+
+// Checks if all input fields are in the action or not.
+// This just uses the value, and looks for what may be missing
+func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Valuereplace) map[string]string {
+	missingFieldsInBody := map[string]string{}
+	if os.Getenv("SKIP_VALIDATION") == "true" {
+		if debug {
+			log.Printf("[DEBUG] Skipping validation of prepared action. This may cause actions to not have all the relevant fields. Please send different input fields for this action.")
+		}
+
+		return missingFieldsInBody
+	}
+
+	unmarshalledAction := shuffle.Action{}
+	err := json.Unmarshal(preparedAction, &unmarshalledAction)
+	if err != nil {
+		log.Printf("[ERROR] Failed unmarshalling action in VALIDATE PreparedAction %s: %s", unmarshalledAction.AppID, err)
+	}
+
+	for _, field := range fields {
+		found := false
+		for _, param := range unmarshalledAction.Parameters {
+			if strings.Contains(param.Value, field.Value) {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			missingFieldsInBody[field.Key] = field.Value
+		}
+	}
+
+
+	// Deleting all fields IF anything is missing.
+
+	if len(missingFieldsInBody) > 0 { 
+		if debug {
+			log.Printf("[DEBUG] Removing translation files as they seem to be missing content. This WILL be overridden if the api is successful and contains all relevant keys")
+		}
+
+		for _, param := range unmarshalledAction.Parameters {
+			if param.Configuration {
+				continue
+			}
+
+			fileId := fmt.Sprintf("file_parameter_-%s-%s-%s.json", strings.ToLower(unmarshalledAction.AppID), strings.Replace(strings.ToLower(unmarshalledAction.Name), " ", "_", -1), strings.ToLower(param.Name))
+
+			category := "app_defaults"
+			if standalone {
+				fileId = fmt.Sprintf("%s/%s", category, fileId)
+			}
+
+			go shuffle.DeleteFileSingul(context.Background(), fileId)
+		}
+	}
+
+	return missingFieldsInBody
+
+}
+
+
+func StoreTranslationOutput(user shuffle.User, fieldHash string, parsedParameterMap map[string]interface{}, inputFieldMap map[string]interface{}) {
+	reversed, err := schemaless.ReverseTranslate(parsedParameterMap, inputFieldMap)
+	if err != nil {
+		log.Printf("[ERROR] Problem with reversing: %s", err)
+	} else {
+		log.Printf("[DEBUG] Raw reverse: %s", reversed)
+
+		finishedFields := 0
+		mappedFields := map[string]interface{}{}
+		err = json.Unmarshal([]byte(reversed), &mappedFields)
+		if err == nil {
+			for _, value := range mappedFields {
+				if _, ok := value.(string); ok && len(value.(string)) > 0 {
+					finishedFields++
+				} else {
+					log.Printf("[DEBUG] Found non-string value: %#v", value)
+				}
+			}
+		}
+
+		if debug { 
+			log.Printf("[DEBUG] Reversed fields (%d): %s", finishedFields, reversed)
+		}
+
+		if finishedFields == 0 {
+		} else {
+
+			timeNow := time.Now().Unix()
+
+			fileId := fmt.Sprintf("file_%s", fieldHash)
+			encryptionKey := fmt.Sprintf("%s_%s", user.ActiveOrg.Id, fileId)
+			folderPath := fmt.Sprintf("%s/%s/%s", basepath, user.ActiveOrg.Id, "global")
+			downloadPath := fmt.Sprintf("%s/%s", folderPath, fileId)
+			file := &shuffle.File{
+				Id:           fileId,
+				CreatedAt:    timeNow,
+				UpdatedAt:    timeNow,
+				Description:  "",
+				Status:       "active",
+				Filename:     fmt.Sprintf("%s.json", fieldHash),
+				OrgId:        user.ActiveOrg.Id,
+				WorkflowId:   "global",
+				DownloadPath: downloadPath,
+				Subflows:     []string{},
+				StorageArea:  "local",
+				Namespace:    "translation_output",
+				Tags: []string{
+					"autocomplete",
+				},
+			}
+
+			returnedId, err := shuffle.UploadFileSingul(context.Background(), file, encryptionKey, []byte(reversed))
+			if err != nil {
+				log.Printf("[ERROR] Problem uploading file: %s", err)
+			} else {
+				log.Printf("[DEBUG] Uploaded file with ID: %s", returnedId)
+			}
+		}
+	}
+}
+
 
 func GetAppOpenapi(appname string) (openapi3.Swagger, error) {
 	swaggerOutput := openapi3.Swagger{}
