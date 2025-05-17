@@ -26,6 +26,11 @@ APIs and AI Agents should be easier to use and build. Singul solves both by bein
 - Singul is based on how we built [Shuffle](https://shuffler.io) and how we connect to APIs. We use the knowledge of Shuffle, including apps, categories, tags, actions, authentication mechanisms, code and more. 
 
 ## Usage
+**Before starting, set the OPENAI_API_KEY environment variable to your OpenAI API key.**
+```
+export OPENAI_API_KEY=key
+```
+
 CLI
 ```
 singul --help
@@ -44,6 +49,39 @@ API: singul.io API
 ```
 curl https://singul.io/api/send_mail -d '{"app": "gmail", "subject": "hoy"}'
 curl https://singul.io/api/list_tickets -d '{"app": "jira"}'
+```
+
+## Controls
+Set these environment variables to control the behavior of Singul. The AI/LLM section is **FOR NOW** only supporting the OpenAI format, but we intend to add more in the future to make it work well standalone. Examples of how to change to a different providers with environment variables is: 
+
+* Local Ollama: OPENAI_API_URL=http://localhost:11434/v1, MODEL=llama2
+* Google Gemini: OPENAI_API_URL=https://generativelanguage.googleapis.com/v1beta/openai, OPENAI_API_KEY=<key>, MODEL=gemini-2.0-flash
+* xAI Grok: OPENAI_API_URL=https://api.x.ai/v1, OPENAI_API_KEY=<key>, MODEL=grok-3-mini-fast-beta
+* Anthropic: OPENAI_API_URL=https://api.anthropic.com/v1, OPENAI_API_KEY=<key>, MODEL=claude-3-7-sonnet-20250219
+* Deepseek: OPENAI_API_URL=https://api.deepseek.com, OPENAI_API_KEY=<key>, MODEL=deepseek-reasoner
+* Mistral: OPENAI_API_URL=https://api.mistral.ai/v1, OPENAI_API_KEY=<key>, MODEL=codestral-latest
+* Amazon Bedrock: NOT COMATIBLE YET :((
+...
+
+**Other OpenAI compatible API's also work**
+
+## Environment Variables
+**REQUIRED:**
+```
+OPENAI_API_KEY=<key> 	# The API key for the OpenAI API, if you want to use a different provider. Default: None
+```
+
+**Singul controls**
+```
+DEBUG=true 				# Enables debug mode
+FILE_LOCATION=<path> 	# The location of the files. Default: ./files
+```
+
+**LLM controls:**
+```
+MODEL=<model> 			# The model to use for the LLM. We recommend reasoning models. Default: o4-mini
+OPENAI_API_URL=<url> 	# The URL of the OpenAI API, if you want to use a different provider. Default: https://api.openai.com/v1/chat/completions
+OPENAI_API_ORG=<org> 	# The organization ID for the OpenAI API, if you want to use a different provider. Default: None
 ```
 
 ## Local Example
