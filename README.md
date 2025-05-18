@@ -16,6 +16,7 @@ Before starting, **set the OPENAI_API_KEY environment variable**. If you want to
 export OPENAI_API_KEY=key
 ```
 
+## Examples
 **CLI**
 ```
 singul --help
@@ -106,7 +107,8 @@ OPENAI_API_URL=<url> 	# The URL of the OpenAI API, if you want to use a differen
 OPENAI_API_ORG=<org> 	# The organization ID for the OpenAI API, if you want to use a different provider. Default: None
 ```
 
-## Local Example
+## Local Test Example
 ```
 go run *.go create_ticket jira --project=SHUF --title="title2" --content="cool new body here 2"
+go run *.go list_tickets jira --max_results=2
 ```
