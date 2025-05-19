@@ -867,7 +867,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		if standalone { 
 			auth, err = GetLocalAuth()
 			if err != nil {
-				log.Printf("[WARNING] Failed getting local auth: %s", err)
+				if debug { 
+					log.Printf("[WARNING] Failed getting local auth: %s", err)
+				}
 			}
 
 		} else {
@@ -1879,7 +1881,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			} else {
 				// Parses out data from the output
 				// Reruns the app with the new parameters
-				log.Printf("\n\nHERE: %#v\n\n", httpParseErr)
+				if debug {
+					log.Printf("[DEBUG] Potential error handling: %#v", httpParseErr)
+				}
+
 				if strings.Contains(strings.ToLower(fmt.Sprintf("%s", httpParseErr)), "status: ") {
 					if debug {
 						log.Printf("[DEBUG] Found status code in schemaless error: %s", httpParseErr)
@@ -2910,7 +2915,7 @@ func AuthenticateAppCli(appname string) error {
 		}
 	}
 
-	log.Printf("[DEBUG] Input your fields for authentication for app %s. Fields: %d. You may always edit this in the ./auth folder later, where they will be stored.", appname, len(app.Authentication.Parameters))
+	log.Printf("[DEBUG] Input your fields for authentication for app %s. Fields: %d. You may always edit this in the {root}/auth folder later, where they will be stored.", appname, len(app.Authentication.Parameters))
 
 	keysEncrypted := false
 	for _, param := range app.Authentication.Parameters {

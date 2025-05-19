@@ -94,6 +94,7 @@ OPENAI_API_KEY=<key> 	# The API key for the OpenAI API, if you want to use a dif
 ```
 DEBUG=true 				# Enables debug mode
 FILE_LOCATION=./files 	# The location of the files. Default: ./files
+SHUFFLE_ENCRYPTION_MODIFIER=randomstringhere # Required for local encryption of authentication.
 
 # Where to download and control standards from 
 GIT_DOWNLOAD_USER=shuffle

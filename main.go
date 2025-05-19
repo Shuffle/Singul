@@ -54,7 +54,9 @@ func runSingul(args []string, flags map[string]string) (string, error) {
 
 	// Make a fake ResponseWrite that can actaully receive data
 	startTime := time.Now()
-	log.Printf("[INFO] Starting request handling with %d parameters", len(value.Fields))
+	if debug { 
+		log.Printf("[DEBUG] Starting request handling with %d parameters", len(value.Fields))
+	}
 	data, err := singul.RunAction(ctx, value)
 	if err != nil {
 		log.Printf("[ERROR] Failed running action: %v", err)
