@@ -1,12 +1,12 @@
 <h1 align="center">
 
-[![Singul Logo](https://shuffler.io/images/logos/singul.svg)](https://singul.io)
+[<img src="https://shuffler.io/images/logos/singul.svg" alt="Singul Logo" width="100"/>](https://singul.io)
 
 Singul
 
 </h1>
 <h4 align="center">
-Connect to anything with a Singul line of code. Now open source!
+Connect to anything with a Singul line of code. Now open source (in Beta)!
 </h4>
 
 ## Usage
