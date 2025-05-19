@@ -1,0 +1,74 @@
+name: Release Go Binaries
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [linux, darwin, windows]
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Set version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Build binary
+        run: |
+          mkdir -p dist
+          export GOOS=${{ matrix.os }}
+          export GOARCH=${{ matrix.arch }}
+          EXT=""
+          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+
+          BINARY_NAME=mytool-${GOOS}-${GOARCH}
+          OUTPUT=dist/$BINARY_NAME$EXT
+
+          echo "Building $OUTPUT"
+          GOOS=$GOOS GOARCH=$GOARCH go build -o $OUTPUT
+
+      - name: Package
+        run: |
+          cd dist
+          FILENAME=mytool-${{ matrix.os }}-${{ matrix.arch }}
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            zip $FILENAME.zip $FILENAME.exe
+          else
+            tar -czf $FILENAME.tar.gz $FILENAME
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: dist
+
+      - name: Upload binaries to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
