@@ -11,8 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        os: [linux, darwin, windows]
-        arch: [amd64, arm64]
+        os: [darwin]
+        arch: [arm64]
+        #os: [linux, darwin, windows]
+        #arch: [amd64, arm64]
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -52,7 +54,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: binaries
+          name: binaries-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*
 
   release:
