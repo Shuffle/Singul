@@ -2,9 +2,11 @@ name: Release Go Binaries
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
+    inputs:
+      version:
+        description: 'Version of the release (e.g. v0.3.6)'
+        required: true
+
 
 jobs:
   build:
@@ -22,7 +24,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.23"
 
       - name: Set version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
