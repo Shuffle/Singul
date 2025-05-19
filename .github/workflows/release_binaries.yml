@@ -68,6 +68,13 @@ jobs:
         with:
           path: dist
 
+      - name: Flatten artifacts
+        run: |
+          find dist -mindepth 2 -type f -exec mv -t dist {} + || true
+
+      - name: List files before uploading
+        run: ls -l dist/
+
       - name: Upload binaries to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
