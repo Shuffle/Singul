@@ -112,3 +112,13 @@ OPENAI_API_ORG=<org> 	# The organization ID for the OpenAI API, if you want to u
 go run *.go create_ticket jira --project=SHUF --title="title2" --content="cool new body here 2"
 go run *.go list_tickets jira --max_results=2
 ```
+
+
+## How it works
+![image](https://github.com/user-attachments/assets/4f06b240-2010-40f6-965b-95a9e381f97e)
+
+![image](https://github.com/user-attachments/assets/fb1a0c83-d021-4308-9074-b5af822e2302)
+
+![image](https://github.com/user-attachments/assets/fc659b7c-dbbc-4c36-8e53-fc23b59995e3)
+
+
