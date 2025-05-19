@@ -18,7 +18,7 @@ export OPENAI_API_KEY=key
 
 ## Examples
 **CLI**
-```
+```bash
 singul --help
 
 # List tickets in the OCSF format
@@ -30,21 +30,29 @@ singul send_mail outlook --subject="hoy" --data="hello world" --to="test@example
 singul send_mail gmail --subject="hoy" --data="hello world" --to="test@example.com"
 ```
 
-**Code (python)**: Local OR Remote
+**Code (python)**:
+Install the library
+```bash
+pip install singul
 ```
+
+Use it locally
+```python
 import singul
 
 # List tickets in the OCSF format
-tickets = singul.list_tickets("jira")
-tickets = singul.list_tickets("service_now")
+tickets = singul.run("jira", action="list_tickets", max_items=10)
+tickets = singul.run("service_now", action="list_tickets", max_items=10)
 
 # Send mail in the same format
-send_mail_response = singul.send_mail("outlook", subject="hoy", data="hello world" to="test@example.com")
-send_mail_response = singul.send_mail("gmail", subject="hoy", data="hello world" to="test@example.com")
+send_mail_response = singul.run("outlook", action="send_mail", subject="hoy", data="hello world" to="test@example.com")
+send_mail_response = singul.run("gmail", action="send_mail", subject="hoy", data="hello world" to="test@example.com")
 ```
 
 **API**: singul.io API with curl
-```
+This requires an API key from [shuffler.io](https://shuffler.io/register), which is used for storing authentication. 
+
+```bash
 # List tickets in the OCSF format
 curl https://singul.io/api/list_tickets -d '{"app": "jira"}'
 curl https://singul.io/api/list_tickets -d '{"app": "service_now"}'
