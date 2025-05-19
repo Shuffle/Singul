@@ -13,10 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        os: [darwin]
-        arch: [arm64]
-        #os: [linux, darwin, windows]
-        #arch: [amd64, arm64]
+        os: [linux, darwin, windows]
+        arch: [amd64, arm64]
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -37,7 +35,7 @@ jobs:
           EXT=""
           if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
 
-          BINARY_NAME=mytool-${GOOS}-${GOARCH}
+          BINARY_NAME=singul-${GOOS}-${GOARCH}
           OUTPUT=dist/$BINARY_NAME$EXT
 
           echo "Building $OUTPUT"
@@ -46,7 +44,7 @@ jobs:
       - name: Package
         run: |
           cd dist
-          FILENAME=mytool-${{ matrix.os }}-${{ matrix.arch }}
+          FILENAME=singul-${{ matrix.os }}-${{ matrix.arch }}
           if [ "${{ matrix.os }}" = "windows" ]; then
             zip $FILENAME.zip $FILENAME.exe
           else
