@@ -2486,8 +2486,6 @@ func Setupvenv(appscriptFolder string) (string, error) {
 		cmd := exec.Command("python3", "-m", "venv", pythonEnvPath)
 		// cmd.Dir = appscriptFolder
 
-		log.Printf("[DEBUG] Running command: %s with dir %s", cmd.String(), cmd.Dir)
-
 		stdoutPipe, err := cmd.StdoutPipe()
 		if err != nil {
 			log.Printf("[WARNING] Failed getting stdout pipe: %s", err)
@@ -2778,7 +2776,7 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 	go io.Copy(&stdoutBuf, stdoutPipe)
 	go io.Copy(&stderrBuf, stderrPipe)
 
-	log.Printf("[DEBUG] Running command: python3 %s", strings.Join(pythonCommandSplit, " "))
+	// log.Printf("[DEBUG] Running command: python3 %s", strings.Join(pythonCommandSplit, " "))
 
 	// Wait for the command to finish
 	if err := cmd.Wait(); err != nil {
