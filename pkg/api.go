@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"path/filepath"
 
 	uuid "github.com/satori/go.uuid"
 
@@ -2477,10 +2478,144 @@ func GetAppOpenapi(appname string) (openapi3.Swagger, error) {
 	return *swagger, nil
 }
 
+func Setupvenv(appscriptFolder string) (string, error) {
+	pythonEnvPath := fmt.Sprintf("%s/venv", appscriptFolder)
+
+	if _, err := os.Stat(pythonEnvPath); os.IsNotExist(err) {
+		log.Printf("[DEBUG] Python virtual environment does not exist. Creating it at: %s", pythonEnvPath)
+		cmd := exec.Command("python3", "-m", "venv", pythonEnvPath)
+		// cmd.Dir = appscriptFolder
+
+		log.Printf("[DEBUG] Running command: %s with dir %s", cmd.String(), cmd.Dir)
+
+		stdoutPipe, err := cmd.StdoutPipe()
+		if err != nil {
+			log.Printf("[WARNING] Failed getting stdout pipe: %s", err)
+			return "", err
+		}
+
+		stderrPipe, err := cmd.StderrPipe()
+		if err != nil {
+			log.Printf("[WARNING] Failed getting stderr pipe: %s", err)
+			return "", err
+		}
+
+		var stdoutBuf, stderrBuf bytes.Buffer
+		if err := cmd.Start(); err != nil {
+			log.Printf("[WARNING] Failed starting command: %s", err)
+			return "", err
+		}
+
+		// Copy output to buffers
+		go io.Copy(&stdoutBuf, stdoutPipe)
+		go io.Copy(&stderrBuf, stderrPipe)
+
+		// Wait for the command to finish
+		if err := cmd.Wait(); err != nil {
+			log.Printf("[WARNING] Failed waiting for command: %s", err)
+			return "", err
+		}
+
+		// Access outputs as strings
+		_ = stdoutBuf.String()
+		_ = stderrBuf.String()
+
+		// log.Printf("[DEBUG] Command stdout: %s", stdoutStr)
+		// log.Printf("[DEBUG] Command stderr: %s", stderrStr)
+
+		// verify that it created venv
+		if _, err := os.Stat(pythonEnvPath); os.IsNotExist(err) {
+			log.Printf("[WARNING] Python virtual environment was not created successfully at: %s", pythonEnvPath)
+			return "", errors.New("Failed creating python virtual environment")
+		}
+
+		log.Printf("[DEBUG] Successfully created python virtual environment at: %s", pythonEnvPath)
+
+
+		absolutePath, err := filepath.Abs(pythonEnvPath)
+		if err != nil {
+			fmt.Printf("Error getting absolute path: %v\n", err)
+			return "", err
+		}
+
+		log.Printf("[DEBUG] Make sure to give the python virtual environment executable permissions\nWith: chmod +x %s/bin/python3", absolutePath)
+
+		// wait for user to confirm from input
+		scanner := bufio.NewScanner(os.Stdin)
+		fmt.Printf("[DEBUG] Press Enter to confirm after giving the python virtual environment executable permissions (chmod +x %s/bin/python3): ", absolutePath)
+		scanner.Scan()
+
+	}
+
+	return pythonEnvPath, nil
+}
+
+func SetupRequirements(requirementsPath string) error {
+	pythonEnvPath, err := Setupvenv(fmt.Sprintf("%s/scripts", basepath))
+	if err != nil {
+		log.Printf("[WARNING] Failed setting up python virtual environment: %s", err)
+		return err
+	}
+
+	requirements := shuffle.GetAppRequirements()
+	err = ioutil.WriteFile(requirementsPath, []byte(requirements), 0644)
+	if err != nil {
+		log.Printf("[WARNING] Failed writing requirements file: %s", err)
+	} else {
+		pythonPath := fmt.Sprintf("%s/bin/python3", pythonEnvPath)
+
+		log.Printf("[DEBUG] Successfully wrote requirements file: %s", requirementsPath)
+		cmd := exec.Command(pythonPath, "-m", "pip", "install", "-r", requirementsPath)
+
+		// log.Printf("[DEBUG] Running command: %s with dir %s", cmd.String(), cmd.Dir)
+
+		stdoutPipe, err := cmd.StdoutPipe()
+		if err != nil {
+			log.Printf("[WARNING] Failed getting stdout pipe: %s", err)
+			return err
+		}
+
+		stderrPipe, err := cmd.StderrPipe()
+		if err != nil {
+			log.Printf("[WARNING] Failed getting stderr pipe: %s", err)
+			return err
+		}
+
+		var stdoutBuf, stderrBuf bytes.Buffer
+		if err := cmd.Start(); err != nil {
+			log.Printf("[WARNING] Failed starting command: %s", err)
+			return err
+		}
+
+		// Copy output to buffers
+		go io.Copy(&stdoutBuf, stdoutPipe)
+		go io.Copy(&stderrBuf, stderrPipe)
+
+		// Wait for the command to finish
+		if err := cmd.Wait(); err != nil {
+			log.Printf("[WARNING] Failed waiting for command: %s", err)
+			return err
+		}
+
+		_ = stdoutBuf.String()
+		_ = stderrBuf.String()
+
+		// log.Printf("[DEBUG] Command stdout: %s", stdoutStr)
+		// log.Printf("[DEBUG] Command stderr: %s", stderrStr)
+
+		if err != nil {
+			log.Printf("[WARNING] Failed installing requirements: %s", err)
+		} else {
+			log.Printf("[DEBUG] Successfully installed requirements for app script: %s", requirementsPath)
+		}
+	}
+
+	return nil
+}
+
 func LocalizeAppscript(appname string) (string, error) {
 	appscriptFolder := fmt.Sprintf("%s/scripts", basepath)
 	scriptPath := fmt.Sprintf("%s/%s.py", appscriptFolder, appname)
-	//log.Printf("[DEBUG] Looking for and running script: %s", scriptPath)
 
 	// Create the folders
 	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
@@ -2513,6 +2648,16 @@ func LocalizeAppscript(appname string) (string, error) {
 		if err != nil {
 			log.Printf("[WARNING] Failed writing script file: %s", err)
 			return "", err
+		}
+
+		requirementsPath := fmt.Sprintf("%s/requirements.txt", appscriptFolder)
+
+		if _, err := os.Stat(requirementsPath); os.IsNotExist(err) {
+			err = SetupRequirements(requirementsPath)
+			if err != nil {
+				log.Printf("[WARNING] Failed setting up requirements: %s", err)
+				return "", err
+			}
 		}
 
 		return pythoncode, nil
@@ -2593,11 +2738,19 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 		if param.Required || len(param.Value) > 0 { 
 			//pythonCommand += fmt.Sprintf(` --%s='%s'`, param.Name, param.Value)
 			pythonCommandSplit = append(pythonCommandSplit, fmt.Sprintf("--%s=%s", param.Name, param.Value))
-		} 
+		}
 	}
 
+	pythonEnvPath, err := Setupvenv(appscriptFolder)	
+	if err != nil {
+		log.Printf("[WARNING] Failed setting up python virtual environment: %s", err)
+		return returnBody, err
+	}
+
+	pythonPath := fmt.Sprintf("%s/bin/python3", pythonEnvPath)
+
 	// Run the command
-	cmd := exec.Command("python3", pythonCommandSplit...)
+	cmd := exec.Command(pythonPath, pythonCommandSplit...)
 
 	//cmd.Dir = appscriptFolder
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -2625,9 +2778,14 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 	go io.Copy(&stdoutBuf, stdoutPipe)
 	go io.Copy(&stderrBuf, stderrPipe)
 
+	log.Printf("[DEBUG] Running command: python3 %s", strings.Join(pythonCommandSplit, " "))
+
 	// Wait for the command to finish
 	if err := cmd.Wait(); err != nil {
 		log.Printf("[WARNING] Failed waiting for command: %s", err)
+
+		log.Printf("[DEBUG] Try: chmod +x %s", scriptPath)
+
 		returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed waiting for command"}`))
 		return returnBody, err
 	}
