@@ -81,12 +81,12 @@ APIs and AI Agents should be easier to use and build. Singul solves both by bein
 ## LLM Controls
 Set these environment variables to control the behavior of Singul. The AI/LLM section is **FOR NOW** only supporting the OpenAI format, but we intend to add more in the future to make it work well standalone. Examples of how to change to a different providers with environment variables is: 
 
-* Local Ollama: OPENAI_API_URL=http://localhost:11434/v1, MODEL=llama2
-* Google Gemini: OPENAI_API_URL=https://generativelanguage.googleapis.com/v1beta/openai, OPENAI_API_KEY=<key>, MODEL=gemini-2.0-flash
-* xAI Grok: OPENAI_API_URL=https://api.x.ai/v1, OPENAI_API_KEY=<key>, MODEL=grok-3-mini-fast-beta
-* Anthropic: OPENAI_API_URL=https://api.anthropic.com/v1, OPENAI_API_KEY=<key>, MODEL=claude-3-7-sonnet-20250219
-* Deepseek: OPENAI_API_URL=https://api.deepseek.com, OPENAI_API_KEY=<key>, MODEL=deepseek-reasoner
-* Mistral: OPENAI_API_URL=https://api.mistral.ai/v1, OPENAI_API_KEY=<key>, MODEL=codestral-latest
+* Local Ollama: OPENAI_API_URL=http://localhost:11434/v1, AI_MODEL=llama2
+* Google Gemini: OPENAI_API_URL=https://generativelanguage.googleapis.com/v1beta/openai, OPENAI_API_KEY=<key>, AI_MODEL=gemini-2.0-flash
+* xAI Grok: OPENAI_API_URL=https://api.x.ai/v1, OPENAI_API_KEY=<key>, AI_MODEL=grok-3-mini-fast-beta
+* Anthropic: OPENAI_API_URL=https://api.anthropic.com/v1, OPENAI_API_KEY=<key>, AI_MODEL=claude-3-7-sonnet-20250219
+* Deepseek: OPENAI_API_URL=https://api.deepseek.com, OPENAI_API_KEY=<key>, AI_MODEL=deepseek-reasoner
+* Mistral: OPENAI_API_URL=https://api.mistral.ai/v1, OPENAI_API_KEY=<key>, AI_MODEL=codestral-latest
 * Amazon Bedrock: NOT COMATIBLE YET :((
 ...
 
@@ -111,7 +111,7 @@ GIT_DOWNLOAD_REPO=standards
 
 **LLM controls:**
 ```
-MODEL=<model> 			# The model to use for the LLM. We recommend reasoning models. Default: o4-mini
+AI_MODEL=<model> 			# The model to use for the LLM. We recommend reasoning models. Default: o4-mini
 OPENAI_API_URL=<url> 	# The URL of the OpenAI API, if you want to use a different provider. Default: https://api.openai.com/v1/chat/completions
 OPENAI_API_ORG=<org> 	# The organization ID for the OpenAI API, if you want to use a different provider. Default: None
 ```
