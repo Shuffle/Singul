@@ -10,7 +10,7 @@ Connect to anything with a Singul line of code. Now open source (in Beta)!
 </h4>
 
 ## Usage
-Before starting, **set the OPENAI_API_KEY environment variable**. If you want to use another provider, check out [LLM Controls](#llm-controls) further down for more information.
+Before starting, **set the OPENAI_API_KEY environment variable**. Other LLM's work as well - check out [LLM Controls](#llm-controls) further down for more information.
 
 ```
 export OPENAI_API_KEY=key
