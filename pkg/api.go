@@ -2052,7 +2052,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 
 						// Goroutine BUT wait on the end
-						for _, item := range foundArray {
+						for cnt, item := range foundArray {
 							log.Printf("[DEBUG] List item: %#v", item)
 							// Check if uid, uuid, id or similar is a valid key
 							if _, ok := item.(map[string]interface{}); !ok {
@@ -2109,7 +2109,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 								log.Printf("[DEBUG] Successfully cached item in schemaless output for label %s: %s", value.Label, foundIdentifier)
 							}
 
-							break
+							if cnt > 100 {
+								break
+							}
 						}
 					}
 
