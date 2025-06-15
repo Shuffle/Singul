@@ -2035,7 +2035,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				// If it starts with list_ or serach_ only for now.
 				// This is just to FORCE it to work and be locally testable
 				foundLabelSplit := strings.Split(value.Label, "_")
-				log.Printf("\n\n\n\nLABELSPLIT: %#v\n\n\n", foundLabelSplit)
+				log.Printf("\n\n\n\nLABELSPLIT: %#v. FIX IN BACKEND!\n\n\n", foundLabelSplit)
 
 				if len(foundLabelSplit) > 1 && (strings.HasPrefix(value.Label, "list_") || strings.HasPrefix(value.Label, "search_")) && len(shuffleApiKey) > 0 && len(shuffleBackend) > 0 && len(shuffleOrg) > 0 {
 					// Check if output is an array
@@ -2049,11 +2049,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						log.Printf("[DEBUG] Found list/search output for label '%s'. Array Length: %d", value.Label, len(foundArray))
 
 						actualLabel := strings.ToLower(strings.Join(foundLabelSplit[1:], "_"))
+						allEntries := []shuffle.CacheKeyData{}
 
 
 						// Goroutine BUT wait on the end
 						for cnt, item := range foundArray {
-							log.Printf("[DEBUG] List item: %#v", item)
 							// Check if uid, uuid, id or similar is a valid key
 							if _, ok := item.(map[string]interface{}); !ok {
 								log.Printf("[WARNING] Item in list output for label %s is not a map: %#v", value.Label, item)
@@ -2068,19 +2068,40 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 							for _, idKey := range idKeys {
 								// Check if lower case exists
 								for key, mapValue := range generatedItem {
-									if strings.ToLower(key) == idKey {
-										// Found the key, set it as the actual label
-										if val, ok := mapValue.(string); ok {
-											foundIdentifier = val
-											break
-										} else {
-											log.Printf("[ERROR] Failed finding ID key in item for label %s: %s", value.Label, mapValue)
-										}
+									if strings.ToLower(key) != idKey {
+										continue
+									}
+
+									// Found the key, set it as the actual label
+									if val, ok := mapValue.(string); ok {
+										foundIdentifier = val
+										break
+									} else {
+										log.Printf("[ERROR] Failed finding ID key in item for label %s: %s", value.Label, mapValue)
 									}
 								}
 
-								if len(foundIdentifier) > 0 {
+								if foundIdentifier != "" {
 									break
+								}
+							}
+
+							// hardcoded override for product name
+							toolKeys := []string{"product", "tool", "service", "application", "app"}
+							if len(secondAction.AppName) > 0 { 
+								for _, toolKey := range toolKeys {
+									for key, mapValue := range generatedItem {
+										if strings.ToLower(key) != toolKey {
+											continue
+										}
+
+										// Found the key, set it to the appname
+										if _, ok := mapValue.(string); ok {
+											generatedItem[key] = strings.ToLower(secondAction.AppName)
+											break
+										}
+
+									}
 								}
 							}
 
@@ -2088,6 +2109,20 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 								log.Printf("[ERROR] Failed finding ID key in item for label %s: %#v", value.Label, item)
 								break
 							}
+
+							// Check if we have already uploaded it recently based on identifier
+							cacheKey := fmt.Sprintf("singul_%s_%s", orgId, foundIdentifier)
+							_, err := shuffle.GetCache(ctx, cacheKey)
+							if err == nil {
+								if debug { 
+									log.Printf("[DEBUG] Found item in cache for label %s in org %s", foundIdentifier, orgId)
+								}
+
+								// We already have it, skip
+								continue
+							}
+
+							shuffle.SetCache(ctx, cacheKey, []byte("true"), 60*60*24*3) // 3 days
 
 							marshalledBody, err := json.Marshal(item)
 							if err != nil {
@@ -2100,19 +2135,25 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 								Value: string(marshalledBody),
 								Category: actualLabel,
 							}
-
-							// Send /api/v1/orgs/{org_id}/set_cache requrest
-							err = sendDatastoreUploadRequest(ctx, datastoreEntry, shuffleApiKey, shuffleOrg, shuffleBackend)
-							if err != nil {
-								log.Printf("[WARNING] Failed sending cache request for item in schemaless output for label %s: %s", value.Label, err)
-							} else {
-								log.Printf("[DEBUG] Successfully cached item in schemaless output for label %s: %s", value.Label, foundIdentifier)
-							}
+						
+							allEntries = append(allEntries, datastoreEntry)
 
 							if cnt > 100 {
 								break
 							}
 						}
+
+						// v0.1: Send /api/v1/orgs/{org_id}/set_cache requrest
+						// v0.2: Send /api/v1/orgs/{org_id}/datastore/upload request
+
+						// Bulk request instead (shuffle 2.1.0 optimisation)
+						err = sendDatastoreUploadRequest(ctx, allEntries, shuffleApiKey, shuffleOrg, shuffleBackend)
+						if err != nil {
+							log.Printf("[WARNING] Failed sending cache request for item in schemaless output for label %s: %s", value.Label, err)
+						} else {
+							log.Printf("[INFO] Successfully stored %d items in schemaless/singul output for label %s in org %s", len(allEntries), value.Label, orgId)
+						}
+
 					}
 
 					log.Printf("\n\n\n")
@@ -2380,16 +2421,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	return jsonParsed, nil
 }
 
-func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry shuffle.CacheKeyData, apikey, orgId, backendUrl string) error {
+func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.CacheKeyData, apikey, orgId, backendUrl string) error {
 
 
 	// Send a request to /api/v1/orgs/{org_id}/set_cache
-	datastoreEntry.OrgId = shuffleOrg
-	// FIXME: Need a backend handler here to do the same thing from insdide Shuffle itself
-	// IF BACKEND...
 	//return SetCacheKey(ctx, datastoreEntry) 
 
-	url := fmt.Sprintf("%s/api/v1/orgs/%s/set_cache", backendUrl, orgId)
+	//url := fmt.Sprintf("%s/api/v1/orgs/%s/set_cache", backendUrl, orgId)
+	url := fmt.Sprintf("%s/api/v2/datastore?bulk=true", backendUrl)
 
 	reqBody, err := json.Marshal(datastoreEntry)
 	if err != nil {
@@ -2408,6 +2447,7 @@ func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry shuffle.Cach
 	//req.Header.Add("accept", "application/json")
 	//req.Header.Add("cache-control", "no-cache")
 	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", apikey))
+	req.Header.Add("Org-Id", orgId)
 	res, err := client.Do(req)
 	if err != nil {
 		return err
@@ -2424,7 +2464,7 @@ func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry shuffle.Cach
 		return errors.New(fmt.Sprintf("Failed sending cache request: %s. Status code: %d. Body: %s", err, res.StatusCode, string(body)))
 	}
 
-	log.Printf("[DEBUG] Successfully sent cache request for item: %s", datastoreEntry.Key)
+	//log.Printf("[DEBUG] Successfully sent datastore request for %d items
 	return nil
 }
 
