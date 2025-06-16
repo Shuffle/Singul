@@ -8,6 +8,7 @@ import (
 	"errors"
 	"context"
 	"strings"
+	"encoding/json"
 	"github.com/spf13/cobra"
 
 	//"singul/pkg"
@@ -63,15 +64,33 @@ func runSingul(args []string, flags map[string]string) (string, error) {
 		return data, err
 	}
 
-	endTime := time.Now()
-	if debug { 
-		log.Printf("[DEBUG] Time taken: %v", endTime.Sub(startTime))
+	// Try to JSON marshal indent the data
+	marshalMap := make(map[string]interface{})
+	err = json.Unmarshal([]byte(data), &marshalMap)
+	if err != nil {
+		if debug { 
+			log.Printf("[DEBUG] Not valid JSON to format")
+		}
+	} else {
+		parsedData, err := json.MarshalIndent(marshalMap, "", "  ")
+		if err != nil {
+			log.Printf("[ERROR] Failed to format JSON: %v", err)
+		} else {
+			data = string(parsedData)
+		}
 	}
+
 
 	fmt.Printf("\n\n===== API OUTPUT =====\n\n%s\n\n", string(data))
 	if err != nil { 
 		fmt.Printf("===== ERROR =====\n\n%s\n\n", err.Error())
 	}
+
+	endTime := time.Now()
+	if debug { 
+		log.Printf("[DEBUG] Time taken: %v", endTime.Sub(startTime))
+	}
+
 
 	return string(data), nil
 }
@@ -123,7 +142,10 @@ func rootCmdRun(cmd *cobra.Command, args []string) {
 	// This is an API key that is public for Algolia
 	// It has restrictions per IP address as to avoid 
 	// Use the Algolia API to search for apps with the name, before asking for the public app from shuffler.io
-	os.Setenv("ALGOLIA_PUBLICKEY", "14bfd695f2152664bb16ca8e8c3e8281")
+	if len("ALGOLIA_PUBLICKEY") == 0 {
+		os.Setenv("ALGOLIA_PUBLICKEY", "14bfd695f2152664bb16ca8e8c3e8281")
+	}
+
 	if len(os.Getenv("SHUFFLE_BACKEND")) == 0 {
 		os.Setenv("SHUFFLE_BACKEND", "https://shuffler.io")
 		os.Setenv("SHUFFLE_CLOUDRUN_URL", "https://shuffler.io")

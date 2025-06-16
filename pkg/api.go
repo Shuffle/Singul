@@ -33,6 +33,7 @@ var basepath = os.Getenv("SHUFFLE_FILE_LOCATION")
 // Set up 3rd party connections IF necessary
 var shuffleApiKey = os.Getenv("SHUFFLE_AUTHORIZATION")
 var shuffleBackend = os.Getenv("SHUFFLE_BACKEND")
+var shuffleOrg = os.Getenv("SHUFFLE_ORG")
 
 // Apps to test:
 // Communication: Slack & Teams -> Send message
@@ -1425,11 +1426,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						missingFields = shuffle.RemoveFromArray(missingFields, key)
 					}
 
-					/*
 					if debug { 
 						log.Printf("[DEBUG] OLD BODY: \n\n%s\n\nNEW BODY: \n\n%s", param.Value, string(marshalledMap))
 					}
-					*/
 
 
 				} else {
@@ -1672,6 +1671,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					unparsedBody, err := handleStandaloneExecution(parentWorkflow)
 					if err != nil {
 						log.Printf("[ERROR] Failed running standalone execution: %s", err)
+						return nil, err
 					}
 
 					// This is the format used in subflow executions, so we just pretend to be the same
@@ -1908,9 +1908,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					}
 				} else {
 					if debug { 
-						log.Printf("[WARNING] Translation file already FOUND (%t) for hash: %#v. Look for file: '{root}/singul/%s'. NOT creating new one.", fieldFileFound, fieldHash, discoverFile)
+						log.Printf("[DEBUG] Translation file already FOUND (%t) for hash: %#v. Look for file: '{root}/singul/%s'. NOT creating new one.", fieldFileFound, fieldHash, discoverFile)
 					}
-				}
+				}	
 
 			} else {
 				// Parses out data from the output
@@ -2062,7 +2062,134 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					}
 				} else {
 					parsedTranslation.Output = outputmap
-					parsedTranslation.RawResponse = nil
+					//parsedTranslation.RawResponse = nil
+				}
+
+				// If it starts with list_ or serach_ only for now.
+				// This is just to FORCE it to work and be locally testable
+				foundLabelSplit := strings.Split(value.Label, "_")
+				log.Printf("\n\n\n\nLABELSPLIT: %#v. FIX IN BACKEND!\n\n\n", foundLabelSplit)
+
+				if len(foundLabelSplit) > 1 && (strings.HasPrefix(value.Label, "list_") || strings.HasPrefix(value.Label, "search_")) && len(shuffleApiKey) > 0 && len(shuffleBackend) > 0 && len(shuffleOrg) > 0 {
+					// Check if output is an array
+					if debug {
+						log.Printf("[DEBUG] Found list/search output for label %s.", value.Label)
+					}
+
+					// .Output = translated
+					// .RawResponse = original (raw)
+					if foundArray, ok := parsedTranslation.Output.([]interface{}); ok {
+						log.Printf("[DEBUG] Found list/search output for label '%s'. Array Length: %d", value.Label, len(foundArray))
+
+						actualLabel := strings.ToLower(strings.Join(foundLabelSplit[1:], "_"))
+						allEntries := []shuffle.CacheKeyData{}
+
+
+						// Goroutine BUT wait on the end
+						for cnt, item := range foundArray {
+							// Check if uid, uuid, id or similar is a valid key
+							if _, ok := item.(map[string]interface{}); !ok {
+								log.Printf("[WARNING] Item in list output for label %s is not a map: %#v", value.Label, item)
+								continue
+							}
+
+							generatedItem := item.(map[string]interface{})
+
+							idKeys := []string{"id", "uid", "uuid", "identifier", "key"}
+
+							foundIdentifier := ""
+							for _, idKey := range idKeys {
+								// Check if lower case exists
+								for key, mapValue := range generatedItem {
+									if strings.ToLower(key) != idKey {
+										continue
+									}
+
+									// Found the key, set it as the actual label
+									if val, ok := mapValue.(string); ok {
+										foundIdentifier = val
+										break
+									} else {
+										log.Printf("[ERROR] Failed finding ID key in item for label %s: %s", value.Label, mapValue)
+									}
+								}
+
+								if foundIdentifier != "" {
+									break
+								}
+							}
+
+							// hardcoded override for product name
+							toolKeys := []string{"product", "tool", "service", "application", "app"}
+							if len(secondAction.AppName) > 0 { 
+								for _, toolKey := range toolKeys {
+									for key, mapValue := range generatedItem {
+										if strings.ToLower(key) != toolKey {
+											continue
+										}
+
+										// Found the key, set it to the appname
+										if _, ok := mapValue.(string); ok {
+											generatedItem[key] = strings.ToLower(secondAction.AppName)
+											break
+										}
+
+									}
+								}
+							}
+
+							if len(foundIdentifier) == 0 {
+								log.Printf("[ERROR] Failed finding ID key in item for label %s: %#v", value.Label, item)
+								break
+							}
+
+							// Check if we have already uploaded it recently based on identifier
+							cacheKey := fmt.Sprintf("singul_%s_%s", orgId, foundIdentifier)
+							_, err := shuffle.GetCache(ctx, cacheKey)
+							if err == nil {
+								if debug { 
+									log.Printf("[DEBUG] Found item in cache for label %s in org %s", foundIdentifier, orgId)
+								}
+
+								// We already have it, skip
+								continue
+							}
+
+							shuffle.SetCache(ctx, cacheKey, []byte("true"), 60*60*24*3) // 3 days
+
+							marshalledBody, err := json.Marshal(item)
+							if err != nil {
+								log.Printf("[ERROR] Failed marshalling item in schemaless output for label %s: %s", value.Label, err)
+								continue
+							}
+
+							datastoreEntry := shuffle.CacheKeyData{
+								Key: foundIdentifier,
+								Value: string(marshalledBody),
+								Category: actualLabel,
+							}
+						
+							allEntries = append(allEntries, datastoreEntry)
+
+							if cnt > 100 {
+								break
+							}
+						}
+
+						// v0.1: Send /api/v1/orgs/{org_id}/set_cache requrest
+						// v0.2: Send /api/v1/orgs/{org_id}/datastore/upload request
+
+						// Bulk request instead (shuffle 2.1.0 optimisation)
+						err = sendDatastoreUploadRequest(ctx, allEntries, shuffleApiKey, shuffleOrg, shuffleBackend)
+						if err != nil {
+							log.Printf("[WARNING] Failed sending cache request for item in schemaless output for label %s: %s", value.Label, err)
+						} else {
+							log.Printf("[INFO] Successfully stored %d items in schemaless/singul output for label %s in org %s", len(allEntries), value.Label, orgId)
+						}
+
+					}
+
+					log.Printf("\n\n\n")
 				}
 			}
 
@@ -2327,6 +2454,53 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	return jsonParsed, nil
 }
 
+func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.CacheKeyData, apikey, orgId, backendUrl string) error {
+
+
+	// Send a request to /api/v1/orgs/{org_id}/set_cache
+	//return SetCacheKey(ctx, datastoreEntry) 
+
+	//url := fmt.Sprintf("%s/api/v1/orgs/%s/set_cache", backendUrl, orgId)
+	url := fmt.Sprintf("%s/api/v2/datastore?bulk=true", backendUrl)
+
+	reqBody, err := json.Marshal(datastoreEntry)
+	if err != nil {
+		log.Printf("[ERROR] Failed marshalling cache item before send: %s", err)
+		return err
+	}
+
+	// May need a fixed client here
+	client := &http.Client{}
+	req, err := http.NewRequest(
+		"POST",
+		url,
+		bytes.NewBuffer(reqBody),
+	)
+
+	//req.Header.Add("accept", "application/json")
+	//req.Header.Add("cache-control", "no-cache")
+	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", apikey))
+	req.Header.Add("Org-Id", orgId)
+	res, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+
+	defer res.Body.Close()
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+
+	if res.StatusCode != 200 {
+		log.Printf("[ERROR] Failed sending cache request: %s. Status code: %d. Body: %s", err, res.StatusCode, string(body))
+		return errors.New(fmt.Sprintf("Failed sending cache request: %s. Status code: %d. Body: %s", err, res.StatusCode, string(body)))
+	}
+
+	//log.Printf("[DEBUG] Successfully sent datastore request for %d items
+	return nil
+}
+
 
 // Checks if all input fields are in the action or not.
 // This just uses the value, and looks for what may be missing
@@ -2533,7 +2707,7 @@ func Setupvenv(appscriptFolder string) (string, error) {
 
 		var stdoutBuf, stderrBuf bytes.Buffer
 		if err := cmd.Start(); err != nil {
-			log.Printf("[WARNING] Failed starting command: %s", err)
+			log.Printf("[WARNING] Failed starting command (1): %s", err)
 			return "", err
 		}
 
@@ -2543,7 +2717,7 @@ func Setupvenv(appscriptFolder string) (string, error) {
 
 		// Wait for the command to finish
 		if err := cmd.Wait(); err != nil {
-			log.Printf("[WARNING] Failed waiting for command: %s", err)
+			log.Printf("[WARNING] Failed waiting for command (2): %s", err)
 			return "", err
 		}
 
@@ -2614,7 +2788,7 @@ func SetupRequirements(requirementsPath string) error {
 
 		var stdoutBuf, stderrBuf bytes.Buffer
 		if err := cmd.Start(); err != nil {
-			log.Printf("[WARNING] Failed starting command: %s", err)
+			log.Printf("[WARNING] Failed starting command (2): %s", err)
 			return err
 		}
 
@@ -2624,7 +2798,7 @@ func SetupRequirements(requirementsPath string) error {
 
 		// Wait for the command to finish
 		if err := cmd.Wait(); err != nil {
-			log.Printf("[WARNING] Failed waiting for command: %s", err)
+			log.Printf("[WARNING] Failed waiting for command (3): %s", err)
 			return err
 		}
 
@@ -2726,9 +2900,9 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 
 	returnBody := []byte(fmt.Sprintf(`{"success": false, "reason": "No action taken"}`))
 	if len(workflow.Actions) != 1 {
-		log.Printf("EXECUTION ACTIONS: %d. CHoosing the LAST node.", len(workflow.Actions))
+		log.Printf("[DEBUG] EXECUTION ACTIONS: %d. CHoosing the LAST node.", len(workflow.Actions))
 		for _, action := range workflow.Actions {
-			log.Printf("ACTION - Name: %s, Label: %s, AppID: %s", action.Name, action.Label, action.AppID)
+			log.Printf("[DEBUG] ACTION - Name: %s, Label: %s, AppID: %s", action.Name, action.Label, action.AppID)
 		}
 
 		workflow.Actions = []shuffle.Action{
@@ -2767,8 +2941,11 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 	pythonCommandSplit := []string{scriptPath, "--standalone", "--action=" + action.Name}
 	for _, param := range action.Parameters {
 		if param.Required || len(param.Value) > 0 { 
-			//pythonCommand += fmt.Sprintf(` --%s='%s'`, param.Name, param.Value)
-			pythonCommandSplit = append(pythonCommandSplit, fmt.Sprintf("--%s=%s", param.Name, param.Value))
+
+			// Will NEED quotes in the future, but the sdk doesn't support it properly...
+			//newCommand := fmt.Sprintf(`--%s='%s'`, param.Name, param.Value)
+			newCommand := fmt.Sprintf(`--%s=%s`, param.Name, param.Value)
+			pythonCommandSplit = append(pythonCommandSplit, newCommand)
 		}
 	}
 
@@ -2800,31 +2977,43 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	if err := cmd.Start(); err != nil {
-		log.Printf("[WARNING] Failed starting command: %s", err)
+		log.Printf("[WARNING] Failed starting command (3): %s", err)
 		returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed starting command"}`))
 		return returnBody, err
 	}
 
 	// Copy output to buffers
-	go io.Copy(&stdoutBuf, stdoutPipe)
-	go io.Copy(&stderrBuf, stderrPipe)
+	io.Copy(&stdoutBuf, stdoutPipe)
+	io.Copy(&stderrBuf, stderrPipe)
 
-	// log.Printf("[DEBUG] Running command: python3 %s", strings.Join(pythonCommandSplit, " "))
+	if debug { 
+		log.Printf("[DEBUG] Running command: python3 %s", strings.Join(pythonCommandSplit, " "))
+	}
 
 	// Wait for the command to finish
+	stdoutStr := stdoutBuf.String()
+	stderrStr := stderrBuf.String()
 	if err := cmd.Wait(); err != nil {
-		log.Printf("[WARNING] Failed waiting for command: %s", err)
+		log.Printf("[ERROR] Failed waiting for command (1): %s", err)
 
-		log.Printf("[DEBUG] Try: chmod +x %s", scriptPath)
+		if len(stderrStr) > 0 {
+			log.Printf("[ERROR] Command stderr (1): %s", stderrStr)
+			returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running command", "stderr": "%s"}`, stderrStr))
+		} else {
+			if len(stdoutStr) > 0 {
+				log.Printf("[WARNING] Command stdout (1): %s", stdoutStr)
+				returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running command", "stdout": "%s"}`, stdoutStr))
+			} else {
+				returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running command"}`))
+			}
+		}
 
-		returnBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed waiting for command"}`))
 		return returnBody, err
 	}
 
-	// Access outputs as strings
-	stdoutStr := stdoutBuf.String()
-	stderrStr := stderrBuf.String()
-	_ = stderrStr
+	if debug { 
+		log.Printf("STDERR1: %s", stderrStr)
+	}
 
 	record := false
 	relevantLines := []string{}
@@ -3041,7 +3230,7 @@ func GetLocalAuth() ([]shuffle.AppAuthenticationStorage, error) {
 		newAuth := shuffle.AppAuthenticationStorage{}
 		err = json.Unmarshal(filedata, &newAuth)
 		if err != nil {
-			log.Printf("[ERROR] Error unmarshalling file: %s", err)
+			log.Printf("[ERROR] Problem unmarshalling auth file %s: %s", filePath, err)
 			continue
 		}
 
@@ -3104,13 +3293,19 @@ func AuthenticateAppCli(appname string) error {
 		}
 	}
 
-	log.Printf("[DEBUG] Input your fields for authentication for app %s. Fields: %d. You may always edit this in the {root}/auth folder later, where they will be stored.", appname, len(app.Authentication.Parameters))
+	fieldnames := []string{}
+	for _, param := range app.Authentication.Parameters {
+		fieldnames = append(fieldnames, param.Name)
+	}
+
+	log.Printf("\n\n\n===== Authenticating %s =====\n", appname)
+	log.Printf("[DEBUG] Input your fields for authentication for app %s. Fields: %s. Stored encrypted if encryption key is configured. You may always re-do this process later.\n", appname, strings.Join(fieldnames, ", "))
 
 	keysEncrypted := false
 	for _, param := range app.Authentication.Parameters {
-		if debug { 
-			log.Printf("[DEBUG] Found parameter %s: %s", param.Name, param.Value)
-		}
+		//if debug { 
+		//	log.Printf("[DEBUG] Found parameter %s: %s", param.Name, param.Value)
+		//}
 
 		// Scanf to get input for each field
 		scan := bufio.NewScanner(os.Stdin)
@@ -3120,7 +3315,12 @@ func AuthenticateAppCli(appname string) error {
 			paramName = strings.Replace(paramName, "_basic", "", -1)
 		}
 
-		fmt.Printf("Enter value for %s (%s): ", paramName, param.Value)
+		if len(param.Value) > 0 {
+			fmt.Printf("\nEnter %s (%s): ", paramName, param.Value)
+		} else {
+			fmt.Printf("\nEnter %s: ", paramName)
+		}
+
 		scan.Scan()
 
 		input := scan.Text()
@@ -3133,6 +3333,10 @@ func AuthenticateAppCli(appname string) error {
 				//return errors.New(fmt.Sprintf("No input provided for %s", param.Name))
 				//}
 			}
+		}
+
+		if strings.HasPrefix(input, "'") && strings.HasSuffix(input, "'") {
+			input = strings.Trim(input, "'")
 		}
 
 		passphrase := fmt.Sprintf("%s-%s", app.ID, param.Name)
