@@ -2037,7 +2037,37 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				foundLabelSplit := strings.Split(value.Label, "_")
 				log.Printf("\n\n\n\nLABELSPLIT: %#v. FIX IN BACKEND!\n\n\n", foundLabelSplit)
 
-				if len(foundLabelSplit) > 1 && (strings.HasPrefix(value.Label, "list_") || strings.HasPrefix(value.Label, "search_")) && len(shuffleApiKey) > 0 && len(shuffleBackend) > 0 && len(shuffleOrg) > 0 {
+				curApikey := shuffleApiKey
+				curBackend := shuffleBackend
+				curOrg := shuffleOrg
+
+				// Can we do this within the context of the current request IF it was a request?
+				// For cloud/self-hosted Shuffle:
+				// 1. Run workflow with Singul action in Shuffle AI
+				// with run_schemaless
+				// 2. Shuffle AI app runs with execution_id=%s&authorization=%s to handle execution auth
+				// 3. This means that the /api/v2/datastore?bulk=true API needs to support execution auth as well, as that's all we have access to. Since we have access to shuffle-shared, it could be possible 
+				// to just set the data straight in the database as well,
+				// but the problem then is that we do local validation
+
+
+				// Conclusion: The /api/v1/datastore API needs to support execution auth
+
+				if len(curApikey) == 0 || len(curBackend) == 0 || len(curOrg) == 0 {
+					newAuth := request.URL.Query().Get("authorization")
+					if len(newAuth) > 0 {
+						curApikey = newAuth
+					}
+
+					// This is a hack to allow execution auth ((:
+					newExecutionId := request.URL.Query().Get("execution_id")
+					if len(newExecutionId) > 0 {
+						curOrg = fmt.Sprintf("execution:%s", newExecutionId)
+					}
+				}
+
+				if len(foundLabelSplit) > 1 && (strings.HasPrefix(value.Label, "list_") || strings.HasPrefix(value.Label, "search_")) && len(curApikey) > 0 && len(curOrg) > 0 {
+
 					// Check if output is an array
 					if debug {
 						log.Printf("[DEBUG] Found list/search output for label %s.", value.Label)
@@ -2147,9 +2177,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						// v0.2: Send /api/v1/orgs/{org_id}/datastore/upload request
 
 						// Bulk request instead (shuffle 2.1.0 optimisation)
-						err = sendDatastoreUploadRequest(ctx, allEntries, shuffleApiKey, shuffleOrg, shuffleBackend)
+						err = sendDatastoreUploadRequest(ctx, allEntries, curApikey, curOrg, curBackend)
 						if err != nil {
-							log.Printf("[WARNING] Failed sending cache request for item in schemaless output for label %s: %s", value.Label, err)
+							log.Printf("[WARNING] Failed sending datastore request (3) for item in schemaless output for label %s: %s", value.Label, err)
 						} else {
 							log.Printf("[INFO] Successfully stored %d items in schemaless/singul output for label %s in org %s", len(allEntries), value.Label, orgId)
 						}
@@ -2425,15 +2455,33 @@ func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.Ca
 
 
 	// Send a request to /api/v1/orgs/{org_id}/set_cache
-	//return SetCacheKey(ctx, datastoreEntry) 
+	if !strings.HasPrefix(backendUrl, "http") {
+		backendUrl = os.Getenv("BASE_URL")
 
-	//url := fmt.Sprintf("%s/api/v1/orgs/%s/set_cache", backendUrl, orgId)
+		if len(os.Getenv("SHUFFLE_CLOUDRUN_URL")) > 0 {
+			backendUrl = os.Getenv("SHUFFLE_CLOUDRUN_URL")
+		}
+
+		if len(backendUrl) == 0 {
+			return errors.New("Backend URL is not set. Please set SHUFFLE_CLOUDRUN_URL or BASE_URL.")
+		}
+	}
+
 	url := fmt.Sprintf("%s/api/v2/datastore?bulk=true", backendUrl)
 
 	reqBody, err := json.Marshal(datastoreEntry)
 	if err != nil {
 		log.Printf("[ERROR] Failed marshalling cache item before send: %s", err)
 		return err
+	}
+
+	// Execution auth workaround
+	if strings.HasPrefix(orgId, "execution:") {
+		executionId := strings.TrimPrefix(orgId, "execution:")
+		url += fmt.Sprintf("%s&execution_id=%s&authorization=%s", url, executionId, apikey)
+
+		orgId = ""
+		apikey = ""
 	}
 
 	// May need a fixed client here
@@ -2444,10 +2492,12 @@ func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.Ca
 		bytes.NewBuffer(reqBody),
 	)
 
-	//req.Header.Add("accept", "application/json")
-	//req.Header.Add("cache-control", "no-cache")
+	if len(orgId) > 0 {
+		req.Header.Add("Org-Id", orgId)
+	}
+
 	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", apikey))
-	req.Header.Add("Org-Id", orgId)
+
 	res, err := client.Do(req)
 	if err != nil {
 		return err
@@ -2460,8 +2510,8 @@ func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.Ca
 	}
 
 	if res.StatusCode != 200 {
-		log.Printf("[ERROR] Failed sending cache request: %s. Status code: %d. Body: %s", err, res.StatusCode, string(body))
-		return errors.New(fmt.Sprintf("Failed sending cache request: %s. Status code: %d. Body: %s", err, res.StatusCode, string(body)))
+		log.Printf("[ERROR] Failed sending datastore request: %s. Status code: %d. Body: %s", err, res.StatusCode, string(body))
+		return errors.New(fmt.Sprintf("Failed sending datastore request (2): %s. Status code: %d. Body: %s", err, res.StatusCode, string(body)))
 	}
 
 	//log.Printf("[DEBUG] Successfully sent datastore request for %d items
