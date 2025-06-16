@@ -107,6 +107,11 @@ SHUFFLE_ENCRYPTION_MODIFIER=randomstringhere # Required for local encryption of 
 # Where to download and control standards from 
 GIT_DOWNLOAD_USER=shuffle
 GIT_DOWNLOAD_REPO=standards
+
+# To upload results to a Datastore, find details on https://shuffler.io/admin. This is disabled by default
+SHUFFLE_ORG="ORG_ID"
+SHUFFLE_AUTHORIZATION="API KEY"
+SHUFFLE_BACKEND="SHUFFLE BACKEND"
 ```
 
 **LLM controls:**
