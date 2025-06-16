@@ -121,6 +121,35 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 		return
 	}
 
+	org, err := shuffle.GetOrg(ctx, user.ActiveOrg.Id)
+	if err != nil {
+		log.Printf("[ERROR] User %s has no active org", user.Id)
+		resp.WriteHeader(500)
+		resp.Write([]byte(`{"success": false, "reason": "User has no active org"}`))
+		return
+	}
+
+	backendRegion := os.Getenv("SHUFFLE_GCEPROJECT_REGION")
+	if len(backendRegion) == 0 {
+		backendRegion = "europe-west2"
+	}
+
+	if org.Region != backendRegion {
+		if len(org.Region) != 0 && backendRegion != "europe-west2" {
+			log.Printf("[ERROR] Incorrect region for AI request. Backend is in %s", org.Region)
+			resp.WriteHeader(500)
+			resp.Write([]byte(`{"success": false, "reason": "Region was made to the incorrect org"}`))
+			return
+		}
+
+		if (org.Region != backendRegion) {
+			log.Printf("[ERROR] Incorrect region for AI request. Backend is in %s", org.Region)
+			resp.WriteHeader(500)
+			resp.Write([]byte(`{"success": false, "reason": "Region was made to the incorrect org"}`))
+			return
+		}
+	}
+
 	var value shuffle.CategoryAction
 	err = json.Unmarshal(body, &value)
 	if err != nil {
@@ -951,6 +980,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		requiresAuth := false
 		for _, action := range selectedApp.Actions {
+			if value.SkipAuthentication {
+				break
+			}
+
 			for _, param := range action.Parameters {
 				if param.Configuration {
 					requiresAuth = true
