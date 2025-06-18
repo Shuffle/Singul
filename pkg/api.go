@@ -140,12 +140,10 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 	}
 
 	if org.Region != backendRegion {
-		if (org.Region != backendRegion) {
-			log.Printf("[ERROR] Incorrect region for AI request. Backend is in %s", org.Region)
-			resp.WriteHeader(500)
-			resp.Write([]byte(`{"success": false, "reason": "Region was made to the incorrect org"}`))
-			return
-		}
+		log.Printf("[ERROR] Incorrect region for AI request. Backend is in %s", org.Region)
+		resp.WriteHeader(500)
+		resp.Write([]byte(`{"success": false, "reason": "Region was made to the incorrect org"}`))
+		return
 	}
 
 	var value shuffle.CategoryAction
