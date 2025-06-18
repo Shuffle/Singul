@@ -976,9 +976,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		requiresAuth := false
 		for _, action := range selectedApp.Actions {
-			//if value.SkipAuthentication {
-			//	break
-			//}
+			if value.SkipAuthentication {
+				break
+			}
 
 			for _, param := range action.Parameters {
 				if param.Configuration {
