@@ -135,6 +135,10 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 		backendRegion = "europe-west2"
 	}
 
+	if len(org.Region) == 0 {
+		org.Region = "europe-west2"
+	}
+
 	if org.Region != backendRegion {
 		if len(org.Region) != 0 && backendRegion != "europe-west2" {
 			log.Printf("[ERROR] Incorrect region for AI request. Backend is in %s", org.Region)
