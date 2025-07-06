@@ -91,7 +91,7 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 				return
 			}
 		} else {
-			log.Printf("[DEBUG] Debug mode is on. Skipping status check in run category action")
+			//log.Printf("\n\n\n\n\n[DEBUG] Singul: Debug mode is on. Skipping status check in run category action")
 		}
 
 		// 4. Check if the user is the owner of the execution
@@ -648,9 +648,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			discoverFile = fmt.Sprintf("translation_output/%s", discoverFile)
 		}
 
-		if debug {
-			log.Printf("[DEBUG] Loading content mapping for fields '%s' with hash '%s'. Filepath: '%s'", strings.Join(sortedKeys, ","), fieldHash, discoverFile)
-		}
+		//if debug {
+		//	log.Printf("[DEBUG] Loading output content mapping for fields '%s' with hash '%s'. Filepath: '%s'", strings.Join(sortedKeys, ","), fieldHash, discoverFile)
+		//}
 
 		file, err := shuffle.GetFileSingul(ctx, discoverFile)
 		if err != nil {
@@ -1203,8 +1203,16 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	}
 
 	// Check if the organisation has a specific set of parameters for this action, mapped to the following fields:
-	selectedAction.AppID = selectedApp.ID
-	selectedAction.AppName = selectedApp.Name
+	if len(selectedApp.ID) > 0 {
+		selectedAction.AppID = selectedApp.ID
+		secondAction.AppID = selectedApp.ID
+	}
+
+	if len(selectedApp.Name) > 0 {
+		selectedAction.AppName = selectedApp.Name
+		secondAction.AppName = selectedApp.Name
+	}
+
 	selectedAction = GetOrgspecificParameters(ctx, *org, selectedAction)
 
 	//log.Printf("[DEBUG] Required bodyfields: %#v", selectedAction.RequiredBodyFields)
@@ -1299,14 +1307,23 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		baseUrl = fmt.Sprintf("%s", os.Getenv("SHUFFLE_CLOUDRUN_URL"))
 	}
 
-	client := shuffle.GetExternalClient(baseUrl)
+	// FIXME: Some confusion about selectedAction vs secondAction usage
+	if len(selectedApp.Name) > 0 {
+		selectedAction.AppName = selectedApp.Name
+		secondAction.AppName = selectedApp.Name
+	}
 
-	selectedAction.AppName = selectedApp.Name
-	selectedAction.AppID = selectedApp.ID
-	selectedAction.AppVersion = selectedApp.AppVersion
+	if len(selectedApp.ID) > 0 {
+		selectedAction.AppID = selectedApp.ID
+		secondAction.AppID = selectedApp.ID
+	}
+
+	if len(selectedApp.AppVersion) > 0 {
+		selectedAction.AppVersion = selectedApp.AppVersion
+		secondAction.AppVersion = selectedApp.AppVersion
+	}
 
 	for _, missing := range missingFields {
-		// FIXME: ONLY body is handled well so far?
 		if missing != "body" {
 			continue
 		}
@@ -1396,8 +1413,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					}
 
 					missingFields = shuffle.RemoveFromArray(missingFields, key)
-
-
 				} else if param.Name == "body" {
 					mapToSearch := map[string]interface{}{}
 					err := json.Unmarshal([]byte(param.Value), &mapToSearch)
@@ -1450,6 +1465,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	orgId := ""
 	authorization := ""
 	optionalExecutionId := ""
+	client := shuffle.GetExternalClient(baseUrl)
 	if len(missingFields) > 0 {
 		if debug {
 			log.Printf("[DEBUG] Missing fields for action: %#v. This means the current translation may be missing or wrong. Setting fieldFileFound back to false and re-setting it at the end", missingFields)
@@ -1545,6 +1561,13 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
+	for paramIndex, param := range secondAction.Parameters {
+		secondAction.Parameters[paramIndex].Example = ""
+		if param.Name == "headers" && len(param.Value) == 0 {
+			secondAction.Parameters[paramIndex].Value = "Content-Type: application/json"
+		}
+	}
+
 	// Runs individual apps, one at a time
 	if value.SkipWorkflow {
 
@@ -1556,14 +1579,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			return respBody, errors.New("Not all required fields were found")
 		}
 
-		// FIXME: Make a check for IF we have filled in all fields or not
-		for paramIndex, param := range secondAction.Parameters {
-			secondAction.Parameters[paramIndex].Example = ""
-			if param.Name == "headers" {
-				// for now
-				secondAction.Parameters[paramIndex].Value = "Content-Type: application/json"
-			}
-		}
 
 		//log.Printf("[DEBUG] App authentication: %#v", secondAction.AuthenticationId)
 		preparedAction, err := json.Marshal(secondAction)
@@ -2064,7 +2079,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				// If it starts with list_ or serach_ only for now.
 				// This is just to FORCE it to work and be locally testable
 				foundLabelSplit := strings.Split(value.Label, "_")
-				log.Printf("\n\n\n\nLABELSPLIT: %#v. FIX IN BACKEND!\n\n\n", foundLabelSplit)
 
 				curApikey := shuffleApiKey
 				curBackend := shuffleBackend
@@ -2096,11 +2110,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				}
 
 				if len(foundLabelSplit) > 1 && (strings.HasPrefix(value.Label, "list_") || strings.HasPrefix(value.Label, "search_")) && len(curApikey) > 0 && len(curOrg) > 0 {
-
-					// Check if output is an array
-					if debug {
-						log.Printf("[DEBUG] Found list/search output for label %s.", value.Label)
-					}
 
 					// .Output = translated
 					// .RawResponse = original (raw)
@@ -2213,6 +2222,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 							log.Printf("[INFO] Successfully stored %d items in schemaless/singul output for label %s in org %s", len(allEntries), value.Label, orgId)
 						}
 
+					} else {
+						log.Printf("[ERROR] Singul output for label %s is not an array: %#v", value.Label, parsedTranslation.Output)
 					}
 
 					log.Printf("\n\n\n")
@@ -3086,7 +3097,7 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuffle.WorkflowAppAction) shuffle.WorkflowAppAction {
 	//log.Printf("\n\n[DEBUG] LOADING ORG SPECIFIC PARAMETERS\n\n")
 	for paramIndex, param := range action.Parameters {
-		if param.Configuration {
+		if param.Configuration && param.Name != "url" {
 			continue
 		}
 
@@ -3094,7 +3105,8 @@ func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuff
 			continue
 		}
 
-		fileId := fmt.Sprintf("file_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(action.Name), " ", "_", -1), strings.ToLower(param.Name))
+		//fileId := fmt.Sprintf("file_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(action.Name), " ", "_", -1), strings.ToLower(param.Name))
+		fileId := fmt.Sprintf("file_parameter_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(action.Name), " ", "_", -1), strings.ToLower(param.Name))
 
 		// Ensures we load from the correct folder
 		if standalone {
@@ -3104,11 +3116,9 @@ func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuff
 
 		file, err := shuffle.GetFileSingul(ctx, fileId)
 		if err != nil || file.Status != "active" {
-			/*
-			if debug { 
-				log.Printf("[WARNING] Parameter file %s%s NOT found or not active. Status: %#v. Err: %s", shuffle.GetSingulStandaloneFilepath(), fileId, file.Status, err)
-			}
-			*/
+			//if debug { 
+			//	log.Printf("[WARNING] Parameter file %s%s NOT found or not active. Status: %#v. Err: %s", shuffle.GetSingulStandaloneFilepath(), fileId, file.Status, err)
+			//}
 
 			continue
 		}
@@ -3117,20 +3127,17 @@ func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuff
 			file.OrgId = org.Id
 		}
 
-		// make a fake resp to get the content
-		//func GetFileContent(ctx context.Context, file *File, resp http.ResponseWriter) ([]byte, error) {
 		content, err := shuffle.GetFileContentSingul(ctx, file, nil)
 		if err != nil {
 			continue
 		}
 
-		if len(content) < 5 {
+		if len(content) < 4 {
 			continue
 		}
 
-		//log.Printf("[INFO] Found content for file %s for action %s in app %s. Should set param.", fileId, action.Name, action.AppName)
-		//action.Parameters[paramIndex].Example = string(content)
 		action.Parameters[paramIndex].Value = string(content)
+		action.Parameters[paramIndex].Example = string(content)
 	}
 
 	return action
