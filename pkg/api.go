@@ -1838,7 +1838,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				}
 			}
 
-			if httpParseErr == nil && httpOutput.Status < 300 {
+			//if httpParseErr == nil && httpOutput.Status < 300 && httpOutput.Status > 0 && successStruct.Success {
+			if httpParseErr == nil && httpOutput.Status < 300 && httpOutput.Status >= 200 {
 				if debug {
 					log.Printf("[DEBUG] Found status from schemaless: %d. Saving the current fields as base. Attempts: %d, Request Time taken: %s", httpOutput.Status, i+1, time.Now().Sub(startTime))
 				}
@@ -2354,7 +2355,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				}
 			}
 
-			// Save the workflow
 			err = shuffle.SetWorkflow(ctx, parentWorkflow, parentWorkflow.ID)
 			if err != nil {
 				log.Printf("[WARNING] Failed saving workflow in run category action: %s", err)
@@ -2467,7 +2467,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 		}
 
-		// Save the workflow
 		err = shuffle.SetWorkflow(ctx, parentWorkflow, parentWorkflow.ID)
 		if err != nil {
 			log.Printf("[WARNING] Failed saving workflow in run category action: %s", err)
