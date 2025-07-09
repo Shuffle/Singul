@@ -287,6 +287,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		value.Label = value.Action
 	}
 
+	if strings.ToLower(value.Label) == strings.ToLower(value.AppName) {
+		value.AppName = ""
+	}
+
 	respBody := []byte{}
 	if len(value.Label) == 0 {
 		respBody = []byte(`{"success": false, "reason": "No label set in category action"}`)
@@ -1488,7 +1492,12 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 
 
-		formattedQuery := fmt.Sprintf("Use the fields '%s' with app %s to '%s'.", strings.Join(formattedQueryFields, "&"), strings.ReplaceAll(selectedApp.Name, "_", " "), strings.ReplaceAll(value.Label, "_", " "))
+		joinedString := strings.Join(formattedQueryFields, "&")
+		if strings.HasPrefix(joinedString, "&") || strings.HasSuffix(joinedString, "&") {
+			joinedString = strings.Trim(joinedString, "&")
+		}
+
+		formattedQuery := fmt.Sprintf("Use the fields '%s' with app %s to '%s'.", joinedString, strings.ReplaceAll(selectedApp.Name, "_", " "), strings.ReplaceAll(value.Label, "_", " "))
 
 		newQueryInput := shuffle.QueryInput{
 			Query:        formattedQuery,
@@ -1573,10 +1582,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		if len(missingFields) > 0 {
 			log.Printf("[WARNING] Not all required fields were found in category action (2). Want: %#v in action %s", missingFields, selectedAction.Name)
-			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Not all required fields are set", "label": "%s", "missing_fields": "%s", "action": "%s", "api_debugger_url": "%s"}`, value.Label, strings.Join(missingFields, ","), selectedAction.Name, fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID)))
-			resp.WriteHeader(400)
-			resp.Write(respBody)
-			return respBody, errors.New("Not all required fields were found")
+			//respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Not all required fields are set", "label": "%s", "missing_fields": "%s", "action": "%s", "api_debugger_url": "%s"}`, value.Label, strings.Join(missingFields, ","), selectedAction.Name, fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID)))
+			//resp.WriteHeader(400)
+			//resp.Write(respBody)
+			//return respBody, errors.New("Not all required fields were found")
 		}
 
 
@@ -1643,28 +1652,54 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		// The request that goes to the CORRECT app
 		// SubflowData{} -> HTTPOutput in .Result
 
-		apprunBody := []byte("{\"success\": true,\"result\": \"{\\\"success\\\": true,\\\"status\\\": 400, \\\"body\\\": \\\"Not all fields have been filled. Ensure the below are inputted in the right field, in the right format.\\\\n")
-		for i := 0; i < maxAttempts; i++ {
+		// FIXME: Using a raw string as we're putting json inside json here and it gets... messy no matter what
+		//apprunBody := []byte("{\"success\": true,\"result\": \"{\\\"success\\\": true,\\\"status\\\": 400, \\\"body\\\": \\\"Not all fields have been filled. Ensure the below are inputted in the right field, in the right format.\\\\n")
 
+		defaultBody := `{"success": true,"result": ""}`
+		apprunBody := []byte(defaultBody)
+		preparedBody := shuffle.SubflowData{
+			Success: true,
+			Result: `{"success": true,"status": 400, "body": "Not all fields have been filled. Ensure the following fields are inputted in the right field, in the right format. If fields are escaped, fix them. | is the split key: `,
+		}
+		
+		for i := 0; i < maxAttempts; i++ {
 			// This is an autocorrective measure to ensure ALL fields
 			// have been filled in according to the input from the user.
 			// This can be disabled with the environment variable:
 			// SKIP_VALIDATION=true
+
 			missingBodyParams := validatePreparedActionHasFields(preparedAction, value.Fields)
 			if len(missingBodyParams) > 0 {
 				fieldFileFound = false
 				allMissingFields := []string{}
 
-				for key, value := range missingBodyParams {
-					allMissingFields = append(allMissingFields, key)
+				if string(apprunBody) == defaultBody {
+					for key, value := range missingBodyParams {
+						allMissingFields = append(allMissingFields, key)
+						_ = value
 
-					apprunBody = []byte(fmt.Sprintf("%s%s=%s\\\\n", string(apprunBody), key, value))
+						preparedBody.Result = fmt.Sprintf(`%s%s=%s | `, preparedBody.Result, key, strings.ReplaceAll(value, `"`, `\"`))
+					}
 
+					if debug { 
+						log.Printf("[ERROR] Problem with missing fields: %#v. This means you MAY get the wrong outcome. Rerunning translations to ensure all fields are included.", strings.Join(allMissingFields, ","))
+					}
+
+					// Remove last newline from preparedBody.Result
+					if len(preparedBody.Result) > 0 && strings.HasSuffix(preparedBody.Result, " | ") {
+						preparedBody.Result = strings.TrimSuffix(preparedBody.Result, " | ")
+					}
+
+					preparedBody.Result = fmt.Sprintf(`%s"}`, preparedBody.Result)
+					//log.Printf("BODY:\n%s", string(apprunBody))
+
+					apprunBody, err = json.Marshal(preparedBody)
+					if err != nil {
+						log.Printf("[ERROR] Failed marshalling prepared body for execute generated app run (1): %s", err)
+					}
 				}
 
-				log.Printf("[ERROR] Problem with missing fields: %#v. This means you MAY get the wrong outcome. Rerunning translations to ensure all fields are included.", strings.Join(allMissingFields, ","))
-
-				apprunBody = []byte(fmt.Sprintf("%s\\\"}\"}", apprunBody))
+				log.Printf("BODY:\n%s", string(apprunBody))
 
 			} else {
 				if standalone { 
@@ -2591,7 +2626,6 @@ func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Val
 
 
 	// Deleting all fields IF anything is missing.
-
 	if len(missingFieldsInBody) > 0 { 
 		if debug {
 			log.Printf("[DEBUG] Removing translation files as they seem to be missing content. This WILL be overridden if the api is successful and contains all relevant keys")
