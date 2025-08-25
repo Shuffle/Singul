@@ -146,6 +146,7 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 		return
 	}
 
+
 	var value shuffle.CategoryAction
 	err = json.Unmarshal(body, &value)
 	if err != nil {
@@ -264,6 +265,223 @@ func GetActionAIResponseWrapper(ctx context.Context, input shuffle.QueryInput) (
 	return foundResponse, err
 }
 
+func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuffle.CategoryAction, request *http.Request) ([]byte, error) {
+	baseUrl := fmt.Sprintf("https://shuffler.io")
+	if len(os.Getenv("BASE_URL")) > 0 {
+		baseUrl = fmt.Sprintf("%s", os.Getenv("BASE_URL"))
+	}
+
+	if len(os.Getenv("SHUFFLE_CLOUDRUN_URL")) > 0 {
+		baseUrl = fmt.Sprintf("%s", os.Getenv("SHUFFLE_CLOUDRUN_URL"))
+	}
+
+	optionalExecutionId := ""
+	authorization := ""
+	if !standalone && len(request.Header.Get("Authorization")) > 0 {
+		tmpAuth := request.Header.Get("Authorization")
+
+		if strings.HasPrefix(tmpAuth, "Bearer") {
+			tmpAuth = strings.Replace(tmpAuth, "Bearer ", "", 1)
+		}
+
+		authorization = tmpAuth
+	}
+
+	if !standalone && len(request.Header.Get("Authorization")) == 0 && len(request.URL.Query().Get("execution_id")) > 0 && len(request.URL.Query().Get("authorization")) > 0 {
+		//apprunUrl = fmt.Sprintf("%s&execution_id=%s&authorization=%s", apprunUrl, request.URL.Query().Get("execution_id"), request.URL.Query().Get("authorization"))
+
+		authorization = request.URL.Query().Get("authorization")
+		optionalExecutionId = request.URL.Query().Get("execution_id")
+	}
+
+	authConfig := fmt.Sprintf("%s,%s,%s,%s", baseUrl, authorization, user.ActiveOrg.Id, optionalExecutionId)
+	if standalone {
+		authConfig = ""
+	}
+
+	// Remapping into non-list JSON blob
+	newMap := map[string]interface{}{}
+	for _, field := range value.Fields {
+		newMap[field.Key] = field.Value
+	}
+
+	marshalledFields, err := json.Marshal(newMap)
+	if err != nil {
+		log.Printf("[ERROR] Singul - Failed marshaling body in category action direct translation: %s", err)
+		return nil, err
+	}
+
+	// Hardcoded during testing. Standards are from 
+	// https://github.com/Shuffle/standards/tree/main/translation_standards
+	if strings.ToLower(value.Label) == "ocsf" {
+		value.Label = "ticket"
+	}
+
+	log.Printf("BODY: %s", string(marshalledFields))
+
+	// Is there any way to ingest these as well? 
+	schemalessOutput, err := schemaless.Translate(ctx, value.Label, marshalledFields, authConfig)
+	if err != nil {
+		log.Printf("[ERROR] Singul - Failed doing direct translation in category action: %s", err)
+		return nil, err
+	}
+
+	// Handles upload of the same value(s)
+	if schemalessOutput != nil && string(schemalessOutput) != string(marshalledFields) {
+		parsedTranslation := shuffle.SchemalessOutput{
+			Output: []interface{}{},
+		}
+
+		if !strings.HasPrefix(string(schemalessOutput), "[") && !strings.HasSuffix(string(schemalessOutput), "]") {
+			// Wrap in array to match the bulk upload mechanism
+			schemalessOutput = []byte(fmt.Sprintf("[%s]", string(schemalessOutput)))
+		}
+
+		err = json.Unmarshal(schemalessOutput, &parsedTranslation)
+		if err != nil {
+			log.Printf("[ERROR] Singul - Failed unmarshaling schemaless output in category action: %s", err)
+		} else {
+			autoUploadSingulOutput(
+				ctx, 
+				user.ActiveOrg.Id, 
+				parsedTranslation, 
+				value, 
+				authorization, 
+				baseUrl, 
+				shuffle.Action{}, 
+			) 
+		}
+	}
+
+	log.Printf("[DEBUG] Got direct translation output: %#v", string(schemalessOutput))
+	return schemalessOutput, err
+}
+
+// Bulk uploads to the datastore in Shuffle
+func autoUploadSingulOutput(ctx context.Context, orgId string, parsedTranslation shuffle.SchemalessOutput, value shuffle.CategoryAction, curApikey string, curBackend string, secondAction shuffle.Action) {
+
+	curOrg := orgId
+	foundLabelSplit := strings.Split(value.Label, "_")
+
+	// .Output = translated
+	// .RawResponse = original (raw)
+	if foundArray, ok := parsedTranslation.Output.([]interface{}); ok {
+		log.Printf("[DEBUG] Found list/search output for label '%s'. Array Length: %d", value.Label, len(foundArray))
+
+		actualLabel := strings.ToLower(strings.Join(foundLabelSplit[1:], "_"))
+		allEntries := []shuffle.CacheKeyData{}
+
+
+		// Goroutine BUT wait on the end
+		for cnt, item := range foundArray {
+			// Check if uid, uuid, id or similar is a valid key
+			if _, ok := item.(map[string]interface{}); !ok {
+				log.Printf("[WARNING] Item in list output for label %s is not a map: %#v", value.Label, item)
+				continue
+			}
+
+			generatedItem := item.(map[string]interface{})
+
+			idKeys := []string{"id", "uid", "uuid", "identifier", "key"}
+
+			foundIdentifier := ""
+			for _, idKey := range idKeys {
+				// Check if lower case exists
+				for key, mapValue := range generatedItem {
+					if strings.ToLower(key) != idKey {
+						continue
+					}
+
+					// Found the key, set it as the actual label
+					if val, ok := mapValue.(string); ok {
+						foundIdentifier = val
+						break
+					} else {
+						log.Printf("[ERROR] Failed finding ID key in item for label %s: %s", value.Label, mapValue)
+					}
+				}
+
+				if foundIdentifier != "" {
+					break
+				}
+			}
+
+			// hardcoded override for product name
+			toolKeys := []string{"product", "tool", "service", "application", "app"}
+			if len(secondAction.AppName) > 0 { 
+				for _, toolKey := range toolKeys {
+					for key, mapValue := range generatedItem {
+						if strings.ToLower(key) != toolKey {
+							continue
+						}
+
+						// Found the key, set it to the appname
+						if _, ok := mapValue.(string); ok {
+							generatedItem[key] = strings.ToLower(secondAction.AppName)
+							break
+						}
+
+					}
+				}
+			}
+
+			if len(foundIdentifier) == 0 {
+				log.Printf("[ERROR] Failed finding ID key in item for label %s: %#v", value.Label, item)
+				break
+			}
+
+			// Check if we have already uploaded it recently based on identifier
+			cacheKey := fmt.Sprintf("singul_%s_%s", orgId, foundIdentifier)
+			_, err := shuffle.GetCache(ctx, cacheKey)
+			if err == nil {
+				if debug { 
+					log.Printf("[DEBUG] Found item in cache for label %s in org %s", foundIdentifier, orgId)
+				}
+
+				// We already have it, skip
+				continue
+			}
+
+			shuffle.SetCache(ctx, cacheKey, []byte("true"), 60*60*24*3) // 3 days
+
+			marshalledBody, err := json.Marshal(item)
+			if err != nil {
+				log.Printf("[ERROR] Failed marshalling item in schemaless output for label %s: %s", value.Label, err)
+				continue
+			}
+
+			datastoreEntry := shuffle.CacheKeyData{
+				Key: foundIdentifier,
+				Value: string(marshalledBody),
+				Category: actualLabel,
+			}
+		
+			allEntries = append(allEntries, datastoreEntry)
+
+			if cnt > 100 {
+				break
+			}
+		}
+
+		// v0.1: Send /api/v1/orgs/{org_id}/set_cache requrest
+		// v0.2: Send /api/v1/orgs/{org_id}/datastore/upload request
+
+		// Bulk request instead (shuffle 2.1.0 optimisation)
+		err := sendDatastoreUploadRequest(ctx, allEntries, curApikey, curOrg, curBackend)
+		if err != nil {
+			log.Printf("[WARNING] Failed sending datastore request (3) for item in schemaless output for label %s: %s", value.Label, err)
+		} else {
+			log.Printf("[INFO] Successfully stored %d items in schemaless/singul output for label %s in org %s", len(allEntries), value.Label, orgId)
+		}
+
+	} else {
+		log.Printf("[ERROR] Singul output for label %s is not an array: %#v", value.Label, parsedTranslation.Output)
+	}
+
+	log.Printf("\n\n\n")
+}
+
+
 func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.CategoryAction, resp http.ResponseWriter, request *http.Request) ([]byte, error) {
 	// Ensures avoidance of nil-pointers in resp.WriteHeader()
 	if resp == nil {
@@ -290,6 +508,28 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	if strings.ToLower(value.Label) == strings.ToLower(value.AppName) {
 		value.AppName = ""
 	}
+
+	// Handles direct translations instead of app runs
+	//strings.ToLower(strings.ReplaceAll(value.Label, " ", "_")) == "translate_standard" && 
+	if strings.ToLower(strings.ReplaceAll(value.Category, " ", "_")) == "translate_standard" {
+
+		if debug { 
+			log.Printf("[DEBUG] Singul - Got translate standard! No app to run - just translate.")
+		}
+
+		respBody, err := handleDirectTranslation(ctx, user, value, request)
+		if err != nil {
+			log.Printf("[ERROR] Failed doing direct translation: %s", err)
+			resp.WriteHeader(500)
+			respBody = []byte(fmt.Sprintf(`{"success": false, "extra": "Translator ONLY supports valid JSON.", "reason": "Failed doing direct translation: %s. Contact support@shuffler.io if this persists."}`, err))
+		} else {
+			resp.WriteHeader(200)
+		}
+			
+		resp.Write(respBody)
+		return respBody, err
+	}
+
 
 	respBody := []byte{}
 	if len(value.Label) == 0 {
@@ -702,7 +942,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		//selectedApp := AutofixAppLabels(selectedApp, value.Label)
 
 		if value.Label != "app_authentication" && value.Label != "authenticate_app" && value.Label != "discover_app" {
-			respBody = []byte(fmt.Sprintf(`{"success": false, "app_id": "%s", "reason": "Failed finding action '%s' labeled in app '%s'. If this is wrong, please suggest a label by finding the app in Shuffle (%s), OR contact support@shuffler.io and we can help with labeling."}`, selectedApp.ID, value.Label, strings.ReplaceAll(selectedApp.Name, "_", " "), fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID)))
+			respBody = []byte(fmt.Sprintf(`{"success": false, "app_id": "%s", "reason": "Failed finding action matching '%s' in app '%s'. If this is wrong, please suggest a label by finding the app in Shuffle (%s), OR contact support@shuffler.io and we can help with labeling."}`, selectedApp.ID, value.Label, strings.ReplaceAll(selectedApp.Name, "_", " "), fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID)))
 			resp.WriteHeader(500)
 			resp.Write(respBody)
 			return respBody, fmt.Errorf("Failed finding action '%s' labeled in app '%s'", value.Label, selectedApp.Name)
@@ -2144,124 +2384,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					}
 				}
 
+				// Handles the actual uploading itself
 				if len(foundLabelSplit) > 1 && (strings.HasPrefix(value.Label, "list_") || strings.HasPrefix(value.Label, "search_")) && len(curApikey) > 0 && len(curOrg) > 0 {
 
-					// .Output = translated
-					// .RawResponse = original (raw)
-					if foundArray, ok := parsedTranslation.Output.([]interface{}); ok {
-						log.Printf("[DEBUG] Found list/search output for label '%s'. Array Length: %d", value.Label, len(foundArray))
-
-						actualLabel := strings.ToLower(strings.Join(foundLabelSplit[1:], "_"))
-						allEntries := []shuffle.CacheKeyData{}
-
-
-						// Goroutine BUT wait on the end
-						for cnt, item := range foundArray {
-							// Check if uid, uuid, id or similar is a valid key
-							if _, ok := item.(map[string]interface{}); !ok {
-								log.Printf("[WARNING] Item in list output for label %s is not a map: %#v", value.Label, item)
-								continue
-							}
-
-							generatedItem := item.(map[string]interface{})
-
-							idKeys := []string{"id", "uid", "uuid", "identifier", "key"}
-
-							foundIdentifier := ""
-							for _, idKey := range idKeys {
-								// Check if lower case exists
-								for key, mapValue := range generatedItem {
-									if strings.ToLower(key) != idKey {
-										continue
-									}
-
-									// Found the key, set it as the actual label
-									if val, ok := mapValue.(string); ok {
-										foundIdentifier = val
-										break
-									} else {
-										log.Printf("[ERROR] Failed finding ID key in item for label %s: %s", value.Label, mapValue)
-									}
-								}
-
-								if foundIdentifier != "" {
-									break
-								}
-							}
-
-							// hardcoded override for product name
-							toolKeys := []string{"product", "tool", "service", "application", "app"}
-							if len(secondAction.AppName) > 0 { 
-								for _, toolKey := range toolKeys {
-									for key, mapValue := range generatedItem {
-										if strings.ToLower(key) != toolKey {
-											continue
-										}
-
-										// Found the key, set it to the appname
-										if _, ok := mapValue.(string); ok {
-											generatedItem[key] = strings.ToLower(secondAction.AppName)
-											break
-										}
-
-									}
-								}
-							}
-
-							if len(foundIdentifier) == 0 {
-								log.Printf("[ERROR] Failed finding ID key in item for label %s: %#v", value.Label, item)
-								break
-							}
-
-							// Check if we have already uploaded it recently based on identifier
-							cacheKey := fmt.Sprintf("singul_%s_%s", orgId, foundIdentifier)
-							_, err := shuffle.GetCache(ctx, cacheKey)
-							if err == nil {
-								if debug { 
-									log.Printf("[DEBUG] Found item in cache for label %s in org %s", foundIdentifier, orgId)
-								}
-
-								// We already have it, skip
-								continue
-							}
-
-							shuffle.SetCache(ctx, cacheKey, []byte("true"), 60*60*24*3) // 3 days
-
-							marshalledBody, err := json.Marshal(item)
-							if err != nil {
-								log.Printf("[ERROR] Failed marshalling item in schemaless output for label %s: %s", value.Label, err)
-								continue
-							}
-
-							datastoreEntry := shuffle.CacheKeyData{
-								Key: foundIdentifier,
-								Value: string(marshalledBody),
-								Category: actualLabel,
-							}
-						
-							allEntries = append(allEntries, datastoreEntry)
-
-							if cnt > 100 {
-								break
-							}
-						}
-
-						// v0.1: Send /api/v1/orgs/{org_id}/set_cache requrest
-						// v0.2: Send /api/v1/orgs/{org_id}/datastore/upload request
-
-						// Bulk request instead (shuffle 2.1.0 optimisation)
-						err = sendDatastoreUploadRequest(ctx, allEntries, curApikey, curOrg, curBackend)
-						if err != nil {
-							log.Printf("[WARNING] Failed sending datastore request (3) for item in schemaless output for label %s: %s", value.Label, err)
-						} else {
-							log.Printf("[INFO] Successfully stored %d items in schemaless/singul output for label %s in org %s", len(allEntries), value.Label, orgId)
-						}
-
-					} else {
-						log.Printf("[ERROR] Singul output for label %s is not an array: %#v", value.Label, parsedTranslation.Output)
-					}
-
-					log.Printf("\n\n\n")
+					autoUploadSingulOutput(ctx, curOrg, parsedTranslation, value, curApikey, curBackend, secondAction)
 				}
 			}
 
