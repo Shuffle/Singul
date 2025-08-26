@@ -294,6 +294,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 		optionalExecutionId = request.URL.Query().Get("execution_id")
 	}
 
+	// This isn't good but... :)
 	authConfig := fmt.Sprintf("%s,%s,%s,%s", baseUrl, authorization, user.ActiveOrg.Id, optionalExecutionId)
 	if standalone {
 		authConfig = ""
@@ -303,6 +304,18 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 	newMap := map[string]interface{}{}
 	for _, field := range value.Fields {
 		newMap[field.Key] = field.Value
+
+		// Try to unmarshal the field itself
+		// This is due to how sanitisation is done
+		if strings.HasPrefix(field.Value, "{") && strings.HasSuffix(field.Value, "}") {
+			tmpMap := map[string]interface{}{}
+			err := json.Unmarshal([]byte(field.Value), &tmpMap)
+			if err == nil {
+				newMap[field.Key] = tmpMap
+			} else {
+				log.Printf("[WARNING] Singul - Failed unmarshaling field %s in category action direct translation: %s", field.Key, err)
+			}
+		}
 	}
 
 	marshalledFields, err := json.Marshal(newMap)
@@ -317,7 +330,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 		value.Label = "ticket"
 	}
 
-	log.Printf("BODY: %s", string(marshalledFields))
+	//log.Printf("BODY: %s", string(marshalledFields))
 
 	// Is there any way to ingest these as well? 
 	schemalessOutput, err := schemaless.Translate(ctx, value.Label, marshalledFields, authConfig)
@@ -328,37 +341,57 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 
 	// Handles upload of the same value(s)
 	if schemalessOutput != nil && string(schemalessOutput) != string(marshalledFields) {
+		if debug { 
+			log.Printf("[DEBUG] Got direct translation output that differs from input. Trying to upload to datastore. Label: %s", value.Label)
+		}
+
 		parsedTranslation := shuffle.SchemalessOutput{
 			Output: []interface{}{},
 		}
 
+		// Remapping so that the return to the user/workflow isn't affected
+		newOutput := schemalessOutput
 		if !strings.HasPrefix(string(schemalessOutput), "[") && !strings.HasSuffix(string(schemalessOutput), "]") {
 			// Wrap in array to match the bulk upload mechanism
-			schemalessOutput = []byte(fmt.Sprintf("[%s]", string(schemalessOutput)))
+			newOutput = []byte(fmt.Sprintf("[%s]", string(newOutput)))
 		}
 
-		err = json.Unmarshal(schemalessOutput, &parsedTranslation)
+		err = json.Unmarshal(newOutput, &parsedTranslation.Output)
 		if err != nil {
-			log.Printf("[ERROR] Singul - Failed unmarshaling schemaless output in category action: %s", err)
+			log.Printf("[ERROR] Singul - Failed unmarshaling schemaless output PRE datastore upload: %s", err)
 		} else {
+			// This is a hack to allow execution auth ((:
+			curOrg := user.ActiveOrg.Id
+			newExecutionId := request.URL.Query().Get("execution_id")
+			if len(newExecutionId) > 0 {
+				curOrg = fmt.Sprintf("execution:%s", newExecutionId)
+			}
+
 			autoUploadSingulOutput(
 				ctx, 
-				user.ActiveOrg.Id, 
-				parsedTranslation, 
-				value, 
+				curOrg, 
 				authorization, 
 				baseUrl, 
+				parsedTranslation, 
+				value, 
 				shuffle.Action{}, 
 			) 
 		}
 	}
 
-	log.Printf("[DEBUG] Got direct translation output: %#v", string(schemalessOutput))
+	//if debug {
+	//	log.Printf("[DEBUG] Singul - Got direct translation output: %#v", string(schemalessOutput))
+	//}
+
 	return schemalessOutput, err
 }
 
 // Bulk uploads to the datastore in Shuffle
-func autoUploadSingulOutput(ctx context.Context, orgId string, parsedTranslation shuffle.SchemalessOutput, value shuffle.CategoryAction, curApikey string, curBackend string, secondAction shuffle.Action) {
+// Was made for a... weird format, so we are just continuing to use that
+	
+// orgId is SOMETIMES mapped to executionId in cases for execution auth
+func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string, curBackend string, parsedTranslation shuffle.SchemalessOutput, value shuffle.CategoryAction, secondAction shuffle.Action) {
+	// Seems to work when authorization (curApikey) is NOT execution based
 
 	curOrg := orgId
 	foundLabelSplit := strings.Split(value.Label, "_")
@@ -369,8 +402,23 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, parsedTranslation
 		log.Printf("[DEBUG] Found list/search output for label '%s'. Array Length: %d", value.Label, len(foundArray))
 
 		actualLabel := strings.ToLower(strings.Join(foundLabelSplit[1:], "_"))
-		allEntries := []shuffle.CacheKeyData{}
+		if len(actualLabel) == 0 {
+			actualLabel = strings.ToLower(strings.ReplaceAll(value.Label, " ", "_"))
 
+			// FIXME: This may not be necessary, but is necessary for now to map to correct standard while upholding the category format
+			// This primarily happens during direct translations anyway
+			// list_tickets -> tickets
+			// ticket -> ticket
+
+			// Since they're different, we're just appending an 's' to make sure
+			// multiples are handlet correctly while pointing back to a label
+			// Remove this to have "normal" labels
+			if actualLabel == "ticket" || actualLabel == "user" || actualLabel == "asset" || actualLabel == "contact" || actualLabel == "alert" || actualLabel == "case" || actualLabel == "event" || actualLabel == "domain" || actualLabel == "ip" || actualLabel == "url" || actualLabel == "file" {
+				actualLabel = fmt.Sprintf("%ss", actualLabel)
+			}
+		}
+
+		allEntries := []shuffle.CacheKeyData{}
 
 		// Goroutine BUT wait on the end
 		for cnt, item := range foundArray {
@@ -2387,7 +2435,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				// Handles the actual uploading itself
 				if len(foundLabelSplit) > 1 && (strings.HasPrefix(value.Label, "list_") || strings.HasPrefix(value.Label, "search_")) && len(curApikey) > 0 && len(curOrg) > 0 {
 
-					autoUploadSingulOutput(ctx, curOrg, parsedTranslation, value, curApikey, curBackend, secondAction)
+					autoUploadSingulOutput(ctx, curOrg, curApikey, curBackend, parsedTranslation, value, secondAction)
 				}
 			}
 
