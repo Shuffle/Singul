@@ -3690,8 +3690,6 @@ func HandleSingulStartnode(execution shuffle.WorkflowExecution, action shuffle.A
 		//return startNode
 	}
 
-	log.Printf("\n\nACTION NAME: %s, APP: %s (%s)\n\n", action.Name, action.AppName, action.AppID)
-
 
 	// Succeeds (startnode): ACTION NAME: Translate standard, APP: Singul (integration)
 	// Fails (mid-workflow): ACTION NAME: run_schemaless, APP: Singul (integration)
@@ -3708,10 +3706,8 @@ func HandleSingulStartnode(execution shuffle.WorkflowExecution, action shuffle.A
 		return action, urls
 	}
 
-	actionId := action.ID
 	if action.AppName == "Shuffle AI" && action.Name == "run_llm" {
 		// FIXME: Fix the GPU mapping here.
-		//urls = []string{"https://shuffle-ai-1-0-0-253565968129.europe-west4.run.app/api/v1/run"}
 		if debug { 
 			log.Printf("\n\n\n[DEBUG] SHUFFLE AI URL REWRITE FOR RUN_LLM. PARAMS: %d\n\n\n", len(action.Parameters))
 		}
@@ -3738,7 +3734,7 @@ func HandleSingulStartnode(execution shuffle.WorkflowExecution, action shuffle.A
 			}
 		}
 
-		log.Printf("[DEBUG][%s] Found agent appname %s for action %s", execution.ExecutionId, foundAgentAppname, actionId)
+		log.Printf("[DEBUG][%s] Found agent appname %s for action %s", execution.ExecutionId, foundAgentAppname, action.ID)
 
 		action.Parameters = []shuffle.WorkflowAppActionParameter{
 			shuffle.WorkflowAppActionParameter{
@@ -3766,7 +3762,7 @@ func HandleSingulStartnode(execution shuffle.WorkflowExecution, action shuffle.A
 
 			marshalledInput, err := json.Marshal(parsedFields)
 			if err != nil {
-				log.Printf("[ERROR][%s] Failed marshalling input for action %s: %s", execution.ExecutionId, actionId, err)
+				log.Printf("[ERROR][%s] Failed marshalling input for action %s: %s", execution.ExecutionId, action.ID, err)
 			} else {
 				action.Parameters = append(action.Parameters, shuffle.WorkflowAppActionParameter{
 					Name:  "fields",
@@ -3781,13 +3777,13 @@ func HandleSingulStartnode(execution shuffle.WorkflowExecution, action shuffle.A
 
 		gceLocation := os.Getenv("SHUFFLE_GCE_LOCATION")
 		gceProject := os.Getenv("SHUFFLE_GCEPROJECT")
-		newUrl := "https://europe-west2-shuffler.cloudfunctions.net/shuffle-ai-1-0-0"
-		if len(gceLocation) > 0 && len(gceProject) > 0 {
-			newUrl = fmt.Sprintf("https://%s-%s.cloudfunctions.net/shuffle-ai-1-0-0", gceLocation, gceProject)
-		}
-
-		urls = []string{
-			newUrl,
+		newUrl := fmt.Sprintf("https://%s-%s.cloudfunctions.net/shuffle-ai-1-0-0", gceLocation, gceProject)
+		if len(gceLocation) == 0 || len(gceProject) == 0 {
+			log.Printf("[DEBUG] GCE location or project not set. Using default URL for schemaless.")
+		} else {
+			urls = []string{
+				newUrl,
+			}
 		}
 
 	}
@@ -3838,17 +3834,18 @@ func HandleSingulStartnode(execution shuffle.WorkflowExecution, action shuffle.A
 			action.Parameters = append(action.Parameters, newParam)
 		}
 
+		action.AppName = "Shuffle-AI"
 		action.Name = "run_schemaless"
 
 		gceLocation := os.Getenv("SHUFFLE_GCE_LOCATION")
 		gceProject := os.Getenv("SHUFFLE_GCEPROJECT")
-		newUrl := "https://europe-west2-shuffler.cloudfunctions.net/shuffle-ai-1-0-0"
-		if len(gceLocation) > 0 && len(gceProject) > 0 {
-			newUrl = fmt.Sprintf("https://%s-%s.cloudfunctions.net/shuffle-ai-1-0-0", gceLocation, gceProject)
-		}
-
-		urls = []string{
-			newUrl,
+		newUrl := fmt.Sprintf("https://%s-%s.cloudfunctions.net/shuffle-ai-1-0-0", gceLocation, gceProject)
+		if len(gceLocation) == 0 || len(gceProject) == 0 {
+			log.Printf("[DEBUG] GCE location or project not set. Using default URL for schemaless.")
+		} else {
+			urls = []string{
+				newUrl,
+			}
 		}
 	}
 
