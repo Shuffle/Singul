@@ -874,6 +874,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	if len(selectedApp.ID) == 0 {
 		log.Printf("[WARNING] Couldn't find app with ID or name '%s' active in org %s (%s)", value.AppName, user.ActiveOrg.Name, user.ActiveOrg.Id)
 		failed := true
+
 		if shuffle.GetProject().Environment == "cloud" {
 			foundApp, err := shuffle.HandleAlgoliaAppSearch(ctx, value.AppName)
 			if err != nil {
@@ -3677,4 +3678,179 @@ func (f *FakeResponseWriter) WriteHeader(statusCode int) {
     }
     f.StatusCode = statusCode
     f.WroteHeader = true
+}
+
+// Controls action mapping
+func HandleSingulStartnode(execution shuffle.WorkflowExecution, action shuffle.Action, urls []string) (shuffle.Action, []string) {
+
+	isSchemaless := false
+	foundAgentAppname := ""
+	if action.AppID == "integration" {
+		isSchemaless = true
+		//return startNode
+	}
+
+	log.Printf("\n\nACTION NAME: %s, APP: %s (%s)\n\n", action.Name, action.AppName, action.AppID)
+
+
+	// Succeeds (startnode): ACTION NAME: Translate standard, APP: Singul (integration)
+	// Fails (mid-workflow): ACTION NAME: run_schemaless, APP: Singul (integration)
+
+
+	if action.AppID == "shuffle_agent" {
+		for _, param := range action.Parameters {
+			if param.Name == "app_name" {
+				foundAgentAppname = param.Value
+				break
+			}
+		}
+
+		return action, urls
+	}
+
+	actionId := action.ID
+	if action.AppName == "Shuffle AI" && action.Name == "run_llm" {
+		// FIXME: Fix the GPU mapping here.
+		//urls = []string{"https://shuffle-ai-1-0-0-253565968129.europe-west4.run.app/api/v1/run"}
+		if debug { 
+			log.Printf("\n\n\n[DEBUG] SHUFFLE AI URL REWRITE FOR RUN_LLM. PARAMS: %d\n\n\n", len(action.Parameters))
+		}
+
+		for _, params := range action.Parameters {
+			if params.Name == "app_name" {
+				foundAgentAppname = params.Value
+				break
+			}
+		}
+
+	}
+
+	if len(foundAgentAppname) > 0 {
+		foundInput := ""
+		foundModel := ""
+		for _, param := range action.Parameters {
+			if param.Name == "input" {
+				foundInput = param.Value
+			}
+
+			if param.Name == "model" {
+				foundModel = param.Value
+			}
+		}
+
+		log.Printf("[DEBUG][%s] Found agent appname %s for action %s", execution.ExecutionId, foundAgentAppname, actionId)
+
+		action.Parameters = []shuffle.WorkflowAppActionParameter{
+			shuffle.WorkflowAppActionParameter{
+				Name:  "category",
+				Value: "AI",
+			},
+			shuffle.WorkflowAppActionParameter{
+				Name:  "action",
+				Value: "run_llm",
+			},
+			shuffle.WorkflowAppActionParameter{
+				Name:  "app_name",
+				Value: foundAgentAppname,
+			},
+		}
+
+		if len(foundInput) > 0 {
+			parsedFields := map[string]interface{}{}
+			parsedFields["input"] = foundInput
+			parsedFields["system_message"] = fmt.Sprintf("Output in JSON format. Maximum 150 output tokens.")
+
+			if len(foundModel) > 0 {
+				parsedFields["model"] = foundModel
+			}
+
+			marshalledInput, err := json.Marshal(parsedFields)
+			if err != nil {
+				log.Printf("[ERROR][%s] Failed marshalling input for action %s: %s", execution.ExecutionId, actionId, err)
+			} else {
+				action.Parameters = append(action.Parameters, shuffle.WorkflowAppActionParameter{
+					Name:  "fields",
+					Value: string(marshalledInput),
+				})
+			}
+		}
+
+		action.AppName = "Shuffle-AI"
+		action.AppVersion = "1.0.0"
+		action.Name = "run_schemaless"
+
+		gceLocation := os.Getenv("SHUFFLE_GCE_LOCATION")
+		gceProject := os.Getenv("SHUFFLE_GCEPROJECT")
+		newUrl := "https://europe-west2-shuffler.cloudfunctions.net/shuffle-ai-1-0-0"
+		if len(gceLocation) > 0 && len(gceProject) > 0 {
+			newUrl = fmt.Sprintf("https://%s-%s.cloudfunctions.net/shuffle-ai-1-0-0", gceLocation, gceProject)
+		}
+
+		urls = []string{
+			newUrl,
+		}
+
+	}
+
+	if isSchemaless {
+		action.Parameters = append(action.Parameters, shuffle.WorkflowAppActionParameter{
+			Name:  "category",
+			Value: strings.ToLower(action.Name),
+		})
+
+		isTranslation := false
+		actionFound := false
+		for _, param := range action.Parameters {
+			if param.Name == "source_data" {
+				isTranslation = true
+			}
+
+			if param.Name == "action" {
+				actionFound = true
+			}
+		}
+
+		// Parser for translate_standard action (custom)
+		// this uses Schemaless for translation
+		if !actionFound {
+			// "action" is the standard we want to translate into.
+			// In Shuffle's case, OCSF is a good option
+
+			// Handle translation
+			foundStandard := "OCSF"
+			if isTranslation {
+				for paramIndex, param := range action.Parameters {
+					if param.Name == "source_data" {
+						action.Parameters[paramIndex].Name = "fields"
+					}
+
+					if param.Name == "standard" && param.Value != "" {
+						foundStandard = param.Value
+					}
+				}
+			}
+
+			newParam := shuffle.WorkflowAppActionParameter{
+				Name:  "action",
+				Value: foundStandard,
+			}
+
+			action.Parameters = append(action.Parameters, newParam)
+		}
+
+		action.Name = "run_schemaless"
+
+		gceLocation := os.Getenv("SHUFFLE_GCE_LOCATION")
+		gceProject := os.Getenv("SHUFFLE_GCEPROJECT")
+		newUrl := "https://europe-west2-shuffler.cloudfunctions.net/shuffle-ai-1-0-0"
+		if len(gceLocation) > 0 && len(gceProject) > 0 {
+			newUrl = fmt.Sprintf("https://%s-%s.cloudfunctions.net/shuffle-ai-1-0-0", gceLocation, gceProject)
+		}
+
+		urls = []string{
+			newUrl,
+		}
+	}
+
+	return action, urls
 }
