@@ -330,8 +330,6 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 		value.Label = "ticket"
 	}
 
-	//log.Printf("BODY: %s", string(marshalledFields))
-
 	// Is there any way to ingest these as well? 
 	schemalessOutput, err := schemaless.Translate(ctx, value.Label, marshalledFields, authConfig)
 	if err != nil {
@@ -906,6 +904,59 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
+	if len(selectedApp.Actions) > 0 && len(selectedAction.Name) == 0 && (value.Label == "api" || value.Label == "custom_action" || value.Action == "custom_action") {
+		log.Printf("[INFO] App %s (%s) has a custom action request. Listing all actions to find a match", selectedApp.Name, selectedApp.ID)
+		for _, action := range selectedApp.Actions {
+			if action.Name == "custom_action" {
+				selectedAction = action
+				break
+			}
+		}
+
+		// Special handler for url -> path mapping
+		if selectedAction.Name == "custom_action" { 
+			pathIndex := -1 
+			urlIndex := -1
+			for fieldIndex, field := range value.Fields {
+				if field.Key == "path" && len(field.Value) > 0 {
+					pathIndex = fieldIndex
+				}
+
+				if field.Key == "url" && len(field.Value) > 0 {
+					urlIndex = fieldIndex
+				}
+			}
+
+			if pathIndex == -1 && urlIndex >= 0 {
+				// Map url to path
+				newValue := strings.TrimSpace(value.Fields[urlIndex].Value)
+
+				// Check if it starts with /, otherwise make it start with /
+				if strings.HasPrefix(newValue, "http://") || strings.HasPrefix(newValue, "https://") {
+					newValueSplit := strings.Split(newValue, "/")
+					if len(newValueSplit) > 3 {
+						newValue = "/" + strings.Join(newValueSplit[3:], "/")
+					} else {
+						newValue = "/"
+					}
+
+					// Replace it to be UNTIL the path
+					value.Fields[urlIndex].Value = strings.Join(newValueSplit[0:3], "/")
+				} else {
+					newValue = "/" + strings.TrimLeft(newValue, "/")
+				}
+
+				// Append, not replace as "url" is a required field
+				// even if it is handled by auth
+				value.Fields = append(value.Fields, shuffle.Valuereplace{
+					Key:   "path",
+					Value: newValue,
+				})
+			}
+		}
+	}
+
+
 	// Section for mapping fields to automatic translation from previous runs
 	fieldHash := ""
 	fieldFileFound := false
@@ -985,6 +1036,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
+
 	if len(selectedAction.Name) == 0 && value.Label != "discover_app" {
 		log.Printf("[WARNING] Couldn't find the label '%s' in app '%s'.", value.Label, selectedApp.Name)
 
@@ -992,6 +1044,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		if value.Label != "app_authentication" && value.Label != "authenticate_app" && value.Label != "discover_app" {
 			respBody = []byte(fmt.Sprintf(`{"success": false, "app_id": "%s", "reason": "Failed finding action matching '%s' in app '%s'. If this is wrong, please suggest a label by finding the app in Shuffle (%s), OR contact support@shuffler.io and we can help with labeling."}`, selectedApp.ID, value.Label, strings.ReplaceAll(selectedApp.Name, "_", " "), fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID)))
+
 			resp.WriteHeader(500)
 			resp.Write(respBody)
 			return respBody, fmt.Errorf("Failed finding action '%s' labeled in app '%s'", value.Label, selectedApp.Name)
@@ -1060,7 +1113,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				continue
 			}
 
-			log.Printf("[DEBUG] GOT BODY: %#v", fixedBody)
+			if debug { 
+				log.Printf("[DEBUG] GOT BODY: %#v", fixedBody)
+			}
 		}
 	}
 
@@ -1512,6 +1567,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	handledRequiredFields := []string{}
 	missingFields = []string{}
 
+	// SelectedAction -> SecondAction append
 	for _, param := range selectedAction.Parameters {
 		// Optional > Required
 		fieldChanged := false
@@ -1536,11 +1592,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 
 		if param.Name == "body" {
-
 			// FIXME: Look for key:values and inject values into them
 			// This SHOULD be just a dumb injection of existing value.Fields & value.OptionalFields for now with synonyms, but later on it should be a more advanced (use schemaless & cross org referencing)
-			if len(param.Example) > 0 {
+			if len(param.Example) > 0 && len(param.Value) == 0 {
 				param.Value = param.Example
+			} else if len(param.Value) > 0 {
 			} else {
 				//param.Value = ""
 				log.Printf("[DEBUG] Found body param. Validating: %#v", param)
@@ -1617,6 +1673,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	}
 
 	for _, missing := range missingFields {
+		// ONLY handle body
 		if missing != "body" {
 			continue
 		}
@@ -1629,9 +1686,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		// Remove newlines
 		fixedBody = strings.ReplaceAll(fixedBody, "\n", "")
-
 		if debug { 
-			log.Printf("[DEBUG] GOT BODY: %#v", fixedBody)
+			log.Printf("[DEBUG] GOT BODY IN MISSINGFIELDS: %#v", fixedBody)
 		}
 
 		if len(fixedBody) > 0 {
@@ -1662,8 +1718,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		break
 	}
 
-	// Finds WHERE in the destination to put the input data
-	// Loops through input fields, then takes the data from them
+	// Finds WHERE in the destination app (params) to put the input data (fields)
+	// Loops through input fields, then takes the data from them and puts
+	// them in the app (if possible)
 	if len(fieldFileContentMap) > 0 {
 		if debug { 
 			log.Printf("[DEBUG] Found file content map (Pre Reverse Schemaless): %#v", fieldFileContentMap)
@@ -1878,7 +1935,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 
 
-		//log.Printf("[DEBUG] App authentication: %#v", secondAction.AuthenticationId)
+		// Used for testing if params are as they should be
+		//for _, param := range secondAction.Parameters {
+		//	log.Printf("PARAM: %s: %s", param.Name, param.Value)
+		//}
+
 		preparedAction, err := json.Marshal(secondAction)
 		if err != nil {
 			log.Printf("[WARNING] Failed marshalling action in category run for app %s: %s", secondAction.AppID, err)
@@ -1952,13 +2013,20 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 		
 		for i := 0; i < maxAttempts; i++ {
+
 			// This is an autocorrective measure to ensure ALL fields
-			// have been filled in according to the input from the user.
+			// have been filled in accordance to the input from the user.
 			// This can be disabled with the environment variable:
 			// SKIP_VALIDATION=true
 
+			// Curious testing to see "body" field-injection
 			missingBodyParams := validatePreparedActionHasFields(preparedAction, value.Fields)
 			if len(missingBodyParams) > 0 {
+
+				if debug { 
+					log.Printf("\n\n[DEBUG] Running missing body params check: %#v\n\n", missingBodyParams)
+				}
+
 				fieldFileFound = false
 				allMissingFields := []string{}
 
@@ -1980,15 +2048,13 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					}
 
 					preparedBody.Result = fmt.Sprintf(`%s"}`, preparedBody.Result)
-					//log.Printf("BODY:\n%s", string(apprunBody))
-
 					apprunBody, err = json.Marshal(preparedBody)
 					if err != nil {
 						log.Printf("[ERROR] Failed marshalling prepared body for execute generated app run (1): %s", err)
 					}
 				}
 
-				log.Printf("BODY:\n%s", string(apprunBody))
+				log.Printf("RESP BODY:\n%s", string(apprunBody))
 
 			} else {
 				if standalone { 
@@ -2031,7 +2097,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						resp.Header().Add(attemptString, fmt.Sprintf("%d", i+1))
 					}
 
-					//log.Printf("[DEBUG] Attempt preparedAction: %s", string(preparedAction))
+					//if debug { 
+					//	log.Printf("\n\n[DEBUG] Attempt preparedAction (url: %s): %s\n\n", apprunUrl, string(preparedAction))
+					//}
 
 					req, err := http.NewRequest(
 						"POST",
@@ -2795,13 +2863,18 @@ func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Val
 		}
 
 		if !found {
+			// FIXME: Question here is: can we in theory just inject it?
+			if debug { 
+				log.Printf("\n\n\n[WARNING] Debug: Field '%s' with value '%s' not found in prepared action for app %s action %s\n\n\n", field.Key, field.Value, unmarshalledAction.AppID, unmarshalledAction.Name)
+			}
+
 			missingFieldsInBody[field.Key] = field.Value
 		}
 	}
 
 
 	// Deleting all fields IF anything is missing.
-	if len(missingFieldsInBody) > 0 { 
+	if len(missingFieldsInBody) > 0 {
 		if debug {
 			log.Printf("[DEBUG] Removing translation files as they seem to be missing content. This WILL be overridden if the api is successful and contains all relevant keys")
 		}
@@ -3380,6 +3453,13 @@ func GetActionFromLabel(ctx context.Context, app shuffle.WorkflowApp, label stri
 		if len(action.CategoryLabel) == 0 {
 			//log.Printf("%s: %#v\n", action.Name, action.CategoryLabel)
 			continue
+		}
+
+		if lowercaseLabel == "api" && action.Name == "custom_action" {
+			log.Printf("\n\n\n[DEBUG] FOUND CUSTOM ACTION FOR API LABEL\n\n\n")
+			exactMatch = true
+			selectedAction = action
+			break
 		}
 
 		//log.Printf("FOUND LABELS: %s -> %#v\n", action.Name, action.CategoryLabel)
