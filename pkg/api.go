@@ -152,7 +152,7 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 	if err != nil {
 		log.Printf("[WARNING] Error with unmarshal input body in category action: %s", err)
 
-		if strings.Contains(fmt.Sprintf("%s", err), "CategoryAction.fields") {
+		if strings.Contains(fmt.Sprintf("%s", err), "CategoryAction.fields") || strings.Contains(fmt.Sprintf("%s", err), "Valuereplace.fields") {
 			var tmpValue shuffle.CategoryActionFieldOverride
 			newerr := json.Unmarshal(body, &tmpValue)
 			if newerr != nil {
@@ -178,7 +178,7 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 				log.Printf("[DEBUG] FAILING INPUT BODY:\n%s", string(body))
 			}
 			resp.WriteHeader(400)
-			resp.Write([]byte(`{"success": false, "reason": "Failed unmarshaling body of the request"}`))
+			resp.Write([]byte(`{"success": false, "reason": "Your input fields are invalid. Please try again."}`))
 			return
 		}
 	}
@@ -1022,7 +1022,15 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					log.Printf("[ERROR] Failed unmarshaling file content in category action: %s", err)
 				}
 			} else {
-				log.Printf("[ERROR] File %s (%s) not active in category action: %s", file.Filename, file.Id, file.Status)
+				log.Printf("[WARNING] File %s (%s) not active in category action: %s. Actively deleting file.", file.Filename, file.Id, file.Status)
+
+				// This ensures the file can show back up later properly.
+				if !standalone && file.Status == "deleted" {
+					err = shuffle.DeleteKey(ctx, "Files", file.Id)
+					if err != nil {
+						log.Printf("[ERROR] Failed deleting file %s (%s) in category action: %s", file.Filename, file.Id, err)
+					}
+				}
 			}
 		}
 	}
