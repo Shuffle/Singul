@@ -905,7 +905,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	}
 
 	if len(selectedApp.Actions) > 0 && len(selectedAction.Name) == 0 && (value.Label == "api" || value.Label == "custom_action" || value.Action == "custom_action") {
-		log.Printf("[INFO] App %s (%s) has a custom action request. Listing all actions to find a match", selectedApp.Name, selectedApp.ID)
+		log.Printf("[INFO] App %s (%s) has a custom_action request. Listing all actions to find a match", selectedApp.Name, selectedApp.ID)
 		for _, action := range selectedApp.Actions {
 			if action.Name == "custom_action" {
 				selectedAction = action
@@ -914,7 +914,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 
 		// Special handler for url -> path mapping
-		if selectedAction.Name == "custom_action" { 
+		if selectedAction.Name != "custom_action" { 
+			log.Printf("[ERROR] Couldn't find custom_action in app %s (%s). Does it need a rebuild? SHOULD be returning.", selectedApp.Name, selectedApp.ID)
+		} else {
 			pathIndex := -1 
 			urlIndex := -1
 			for fieldIndex, field := range value.Fields {
@@ -1729,6 +1731,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	// Finds WHERE in the destination app (params) to put the input data (fields)
 	// Loops through input fields, then takes the data from them and puts
 	// them in the app (if possible)
+	// This is to try to automatically remap the fields even before we are to use them
+	// PS: This gets autocorrected AFTER the request has ran, which will be stored
+	// as the mapping for the next runs
 	if len(fieldFileContentMap) > 0 {
 		if debug { 
 			log.Printf("[DEBUG] Found file content map (Pre Reverse Schemaless): %#v", fieldFileContentMap)
@@ -1812,6 +1817,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 				}
 					
+				// FIXME: selectedAction & secondAction are not necessary
+				// fix this lol
 				secondAction.Parameters = selectedAction.Parameters
 				break
 			}
@@ -2032,7 +2039,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			if len(missingBodyParams) > 0 {
 
 				if debug { 
-					log.Printf("\n\n[DEBUG] Running missing body params check: %#v\n\n", missingBodyParams)
+					log.Printf("\n\n[DEBUG] Running missing body params check & injection: %#v\n\n", missingBodyParams)
 				}
 
 				fieldFileFound = false
@@ -2861,16 +2868,32 @@ func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Val
 		log.Printf("[ERROR] Failed unmarshalling action in VALIDATE PreparedAction %s: %s", unmarshalledAction.AppID, err)
 	}
 
+	for _, param := range unmarshalledAction.Parameters {
+		log.Printf("PARAM: %s = '%s'", param.Name, param.Value)
+	}
+
+	// Since fields can be different
 	for _, field := range fields {
-		found := false
-		for _, param := range unmarshalledAction.Parameters {
+		valueFound := false
+		for paramIndex, param := range unmarshalledAction.Parameters {
+			// FIXME: Why contains specifically?
+			// Should prolly do a fuzzy match mechanism 
 			if strings.Contains(param.Value, field.Value) {
-				found = true
+				valueFound = true
 				break
+			}
+
+			if param.Name == field.Key {
+				if len(field.Value) > 0 {
+					unmarshalledAction.Parameters[paramIndex].Value = field.Value
+					log.Printf("[DEBUG] Rewriting parameter '%s' to correct value '%s' (start)", param.Name, field.Value)
+					valueFound = true
+					break
+				}
 			}
 		}
 
-		if !found {
+		if !valueFound {
 			// FIXME: Question here is: can we in theory just inject it?
 			if debug { 
 				log.Printf("\n\n\n[WARNING] Debug: Field '%s' with value '%s' not found in prepared action for app %s action %s\n\n\n", field.Key, field.Value, unmarshalledAction.AppID, unmarshalledAction.Name)
@@ -2880,8 +2903,12 @@ func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Val
 		}
 	}
 
+	for _, param := range unmarshalledAction.Parameters {
+		log.Printf("PARAM2: %s = '%s'", param.Name, param.Value)
+	}
 
-	// Deleting all fields IF anything is missing.
+
+	// Deleting relevant fields IF anything is missing.
 	if len(missingFieldsInBody) > 0 {
 		if debug {
 			log.Printf("[DEBUG] Removing translation files as they seem to be missing content. This WILL be overridden if the api is successful and contains all relevant keys")
