@@ -670,7 +670,27 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	_ = labelIndex
 
-	//log.Printf("[INFO] Found label '%s' in category '%s'. Indexes for category: %d, and label: %d", value.Label, value.Category, foundIndex, labelIndex)
+	// WITHOUT finding the app first
+	if len(value.Category) == 0 && len(value.AppName) == 0 && len(value.AppId) == 0 && (value.Label == "api" || value.Label == "custom_action" || value.Action == "custom_action") {
+		log.Printf("[INFO] Got Singul 'custom action' request WITHOUT app. Mapping to HTTP 1.4.0.")
+		value.AppName = "HTTP"
+		value.AppVersion = "1.4.0"
+		value.Label = "GET"
+		value.Action = "GET"
+
+		newFields := []shuffle.Valuereplace{}
+		for _, field := range value.Fields {
+			if strings.ToLower(field.Key) == "method" {
+				value.Label = strings.ToUpper(field.Value)
+				value.Action = value.Label
+				continue
+			}
+
+			newFields = append(newFields, field)
+		}
+
+		value.Fields = newFields
+	}
 
 	var err error
 	org := &shuffle.Org{}
@@ -690,7 +710,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			log.Printf("[ERROR] Failed getting org %s (%s) in category action: %s", user.ActiveOrg.Name, user.ActiveOrg.Id, err)
 		}
 	} else {
-		//log.Printf("[INFO] Standalone mode. Loading details for app %s", value.AppName)
+		if debug { 
+			log.Printf("[INFO] Singul Standalone mode. Loading details for app '%s'", value.AppName)
+		}
 
 		if len(value.AppName) == 0 {
 			respBody = []byte(`{"success": false, "reason": "Provide an app name in the request"}`)
@@ -779,22 +801,20 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
+
+	partialMatch := true
+	availableLabels := []string{}
 	selectedApp := shuffle.WorkflowApp{}
 	selectedCategory := shuffle.AppCategory{}
 	selectedAction := shuffle.WorkflowAppAction{}
 
-	//RunAiQuery(systemMessage, userMessage)
-
-	partialMatch := true
-	availableLabels := []string{}
-
 	matchName := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value.AppName)), " ", "_")
 	for _, app := range newapps {
-		if app.Name == "" || len(app.Categories) == 0 {
+		if app.Name == "" {
 			continue
 		}
 
-		// If we HAVE an app as a category already
+		// If we HAVE just a category - no app 
 		if len(matchName) == 0 {
 			availableLabels = []string{}
 			if len(app.Categories) == 0 {
@@ -843,11 +863,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		} else {
 			appName := strings.TrimSpace(strings.ReplaceAll(strings.ToLower(app.Name), " ", "_"))
-
 			// If we DONT have a category app already
 			if app.ID == matchName || appName == matchName {
 				selectedApp = app
-				//log.Printf("[DEBUG] Found app - checking label: %s vs %s (%s)", app.Name, value.AppName, app.ID)
+				//log.Printf("[DEBUG] Found app %s vs %s (%s). Checking for label/action %s", app.Name, value.AppName, app.ID, value.Label)
 
 				selectedAction, selectedCategory, availableLabels = GetActionFromLabel(ctx, app, value.Label, true, value.Fields, 0)
 				partialMatch = false
@@ -892,18 +911,99 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					}
 				}
 			} else {
-				log.Printf("[DEBUG] Found app with ID or name '%s' in Algolia: %#v", value.AppName, foundApp)
+				if debug { 
+					log.Printf("[DEBUG] FAILED to find app with ID or name '%s' in Algolia: %#v", value.AppName, foundApp)
+				}
 			}
 		}
 
+		// TRY to map it to HTTP and run it automatically
 		if failed {
-			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed finding an app with the name or ID '%s'. Explain more clearly what app you would like to run with."}`, value.AppName))
-			resp.WriteHeader(500)
-			resp.Write(respBody)
-			return respBody, fmt.Errorf("Failed finding an app with the name or ID '%s'", value.AppName)
+			foundFields := 0
+
+			value.AppName = "HTTP"
+			value.AppVersion = "1.4.0"
+			value.Label = "GET"
+			value.Action = "GET"
+
+			selectedApp = shuffle.WorkflowApp{
+				Name: "HTTP",
+				AppVersion: "1.4.0",
+			}
+
+			if shuffle.GetProject().Environment == "cloud" {
+				foundApp, err := shuffle.HandleAlgoliaAppSearch(ctx, "HTTP")
+				if err == nil && len(foundApp.ObjectID) > 0 {
+					foundAppObject, err := shuffle.GetApp(ctx, foundApp.ObjectID, user, false)
+					if err == nil {
+						selectedApp = *foundAppObject
+					} else {
+						log.Printf("[ERROR] Failed getting app details for HTTP app in category action: %s. Name %s (%s) (2)", err, foundApp.Name, foundApp.ObjectID)
+					}
+				} else {
+					log.Printf("[ERROR] Failed getting app with ID or name 'HTTP' in category action: %s. Name: %s (%s)", err, foundApp.Name, foundApp.ObjectID)
+				}
+			}
+
+			newFields := []shuffle.Valuereplace{}
+			for _, field := range value.Fields {
+				if field.Key == "method" {
+					value.Label = strings.ToUpper(field.Value)
+					value.Action = value.Label
+					foundFields++
+					continue
+				}
+
+				if field.Key == "url" || field.Key == "body" {
+					foundFields++
+				}
+
+				if len(field.Value) == 0 {
+					continue
+				}
+
+				newFields = append(newFields, field)
+			}
+
+			// Force inject action if not set
+			if shuffle.GetProject().Environment != "cloud" {
+				selectedApp.Actions = []shuffle.WorkflowAppAction{
+					shuffle.WorkflowAppAction{
+						Name:		  value.Label,
+						ID:           value.Label,
+						Parameters:    []shuffle.WorkflowAppActionParameter{
+							shuffle.WorkflowAppActionParameter{
+								Name:        "url",
+								Required:    true,
+							},
+							shuffle.WorkflowAppActionParameter{
+								Name:        "headers",
+							},
+						},
+					},
+				}
+
+				if value.Label == "POST" || value.Label == "PUT" || value.Label == "PATCH" {
+					selectedApp.Actions[0].Parameters = append(selectedApp.Actions[0].Parameters, shuffle.WorkflowAppActionParameter{
+						Name:        "body",
+					})
+				}
+			}
+
+			if foundFields > 2 {
+				value.Fields = newFields 
+				selectedAction, selectedCategory, availableLabels = GetActionFromLabel(ctx, selectedApp, value.Label, true, value.Fields, 0)
+
+			} else {
+				respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed finding an app with the name or ID '%s'. Explain more clearly what app you would like to run with."}`, value.AppName))
+				resp.WriteHeader(500)
+				resp.Write(respBody)
+				return respBody, fmt.Errorf("Failed finding an app with the name or ID '%s'", value.AppName)
+			}
 		}
 	}
 
+	// WITH the correct app - predicates that auth is set
 	if len(selectedApp.Actions) > 0 && len(selectedAction.Name) == 0 && (value.Label == "api" || value.Label == "custom_action" || value.Action == "custom_action") {
 		log.Printf("[INFO] App %s (%s) has a custom_action request. Listing all actions to find a match", selectedApp.Name, selectedApp.ID)
 		for _, action := range selectedApp.Actions {
@@ -958,7 +1058,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
-
 	// Section for mapping fields to automatic translation from previous runs
 	fieldHash := ""
 	fieldFileFound := false
@@ -1001,7 +1100,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		file, err := shuffle.GetFileSingul(ctx, discoverFile)
 		if err != nil {
 			if debug {
-				log.Printf("[ERROR] Problem with getting field file '%s' in category action autorun: %s", discoverFile, err)
+				log.Printf("[WARNING] Debug - Problem with getting field file '%s' in category action autorun: %s", discoverFile, err)
 			}
 		} else {
 			//log.Printf("[DEBUG] Found translation file in category action: %#v. Status: %s. Category: %s", file.Id, file.Status, file.Namespace)
@@ -1045,7 +1144,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//log.Printf("\n\n[DEBUG] Due to webhook in app %s (%s), we don't need an action. Should not return\n\n", selectedApp.Name, selectedApp.ID)
 		}
 	}
-
 
 	if len(selectedAction.Name) == 0 && value.Label != "discover_app" {
 		log.Printf("[WARNING] Couldn't find the label '%s' in app '%s'.", value.Label, selectedApp.Name)
@@ -1452,7 +1550,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	}
 
 	if !standalone && !value.SkipWorkflow {
-		log.Printf("\n\n[INFO] Adding workflow %s\n\n", parentWorkflow.ID)
+		log.Printf("\n\n[INFO] SHOULD add workflow %s\n\n", parentWorkflow.ID)
 	}
 
 	// Now start connecting it to the correct app (Jira?)
@@ -1697,7 +1795,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		// Remove newlines
 		fixedBody = strings.ReplaceAll(fixedBody, "\n", "")
 		if debug { 
-			log.Printf("[DEBUG] GOT BODY IN MISSINGFIELDS: %#v", fixedBody)
+			log.Printf("[DEBUG] GOT BODY IN MISSINGFIELDS? => %#v", fixedBody)
 		}
 
 		if len(fixedBody) > 0 {
@@ -2026,7 +2124,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			Success: true,
 			Result: `{"success": true,"status": 400, "body": "Not all fields have been filled. Ensure the following fields are inputted in the right field, in the right format. If fields are escaped, fix them. | is the split key: `,
 		}
-		
+
 		for i := 0; i < maxAttempts; i++ {
 
 			// This is an autocorrective measure to ensure ALL fields
@@ -2072,6 +2170,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				log.Printf("RESP BODY:\n%s", string(apprunBody))
 
 			} else {
+
+				// Standalone => runs the app, but as a "subflow", which locally 
+				// directly executes the python script
 				if standalone { 
 					unmarshalledAction := shuffle.Action{}
 					err = json.Unmarshal(preparedAction, &unmarshalledAction)
@@ -2112,10 +2213,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						resp.Header().Add(attemptString, fmt.Sprintf("%d", i+1))
 					}
 
-					//if debug { 
-					//	log.Printf("\n\n[DEBUG] Attempt preparedAction (url: %s): %s\n\n", apprunUrl, string(preparedAction))
-					//}
+					if debug { 
+						log.Printf("\n\n[DEBUG] Attempt preparedAction (url: %s): %s\n\n", apprunUrl, string(preparedAction))
+					}
 
+					log.Printf("PREPARED ACTION: %s", string(preparedAction))
 					req, err := http.NewRequest(
 						"POST",
 						apprunUrl,
@@ -2176,7 +2278,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			successStruct := shuffle.ResultChecker{}
 			unmarshallErr := json.Unmarshal(apprunBody, &successStruct)
 			if unmarshallErr != nil {
-				log.Printf("[WARNING] Failed unmarshalling body for execute generated app run (4): %s", err)
+				log.Printf("[WARNING] Failed unmarshalling body for execute generated app run (4): %s. Raw: %s", err, string(apprunBody))
 			}
 
 			httpOutput, marshalledBody, httpParseErr = shuffle.FindHttpBody(apprunBody)
@@ -2334,7 +2436,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				// Parses out data from the output
 				// Reruns the app with the new parameters
 				if debug {
-					log.Printf("[DEBUG] Potential error handling: %#v", httpParseErr)
+					log.Printf("[DEBUG] Potential error handling: %#v. Output: %s", httpParseErr, string(apprunBody))
 				}
 
 				if strings.Contains(strings.ToLower(fmt.Sprintf("%s", httpParseErr)), "status: ") {
@@ -2447,7 +2549,12 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			outputmap := make(map[string]interface{})
 			schemalessOutput, err := schemaless.Translate(ctx, value.Label, marshalledBody, authConfig)
 			if err != nil {
-				log.Printf("[ERROR] Failed translating schemaless output for label '%s': %s", value.Label, err)
+
+				if value.AppName == "HTTP" || value.App == "HTTP" {
+					parsedTranslation.Success = true
+				} else {
+					log.Printf("[ERROR] Failed translating schemaless output for label '%s': %s", value.Label, err)
+				}
 
 				/*
 					err = json.Unmarshal(marshalledBody, &outputmap)
@@ -2868,9 +2975,9 @@ func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Val
 		log.Printf("[ERROR] Failed unmarshalling action in VALIDATE PreparedAction %s: %s", unmarshalledAction.AppID, err)
 	}
 
-	for _, param := range unmarshalledAction.Parameters {
-		log.Printf("PARAM: %s = '%s'", param.Name, param.Value)
-	}
+	//for _, param := range unmarshalledAction.Parameters {
+	//	log.Printf("PARAM: %s = '%s'", param.Name, param.Value)
+	//}
 
 	// Since fields can be different
 	for _, field := range fields {
@@ -2903,9 +3010,9 @@ func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Val
 		}
 	}
 
-	for _, param := range unmarshalledAction.Parameters {
-		log.Printf("PARAM2: %s = '%s'", param.Name, param.Value)
-	}
+	//for _, param := range unmarshalledAction.Parameters {
+	//	log.Printf("PARAM2: %s = '%s'", param.Name, param.Value)
+	//}
 
 
 	// Deleting relevant fields IF anything is missing.
@@ -2938,9 +3045,9 @@ func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Val
 func StoreTranslationOutput(user shuffle.User, fieldHash string, parsedParameterMap map[string]interface{}, inputFieldMap map[string]interface{}) {
 	reversed, err := schemaless.ReverseTranslate(parsedParameterMap, inputFieldMap)
 	if err != nil {
-		log.Printf("[ERROR] Problem with reversing: %s", err)
+		log.Printf("[ERROR] Problem with schemaless reversing: %s", err)
 	} else {
-		log.Printf("[DEBUG] Raw reverse: %s", reversed)
+		log.Printf("[DEBUG] Raw schemaless reverse: %s", reversed)
 
 		finishedFields := 0
 		mappedFields := map[string]interface{}{}
@@ -3485,18 +3592,25 @@ func GetActionFromLabel(ctx context.Context, app shuffle.WorkflowApp, label stri
 	lowercaseLabel := strings.ReplaceAll(strings.ToLower(label), " ", "_")
 	exactMatch := false
 	for _, action := range app.Actions {
+
+		// Edgecases to autocorrect actions outside of "just" Singul
+		// E.g. RANDOM request from user -> find action -> try it and fix
+		if lowercaseLabel == "api" && action.Name == "custom_action" {
+			exactMatch = true
+			selectedAction = action
+			break
+		} else if strings.ToLower(app.Name) == "http" {
+			if label == action.Name {
+				exactMatch = true
+				selectedAction = action
+				break
+			}
+		}
+
 		if len(action.CategoryLabel) == 0 {
 			//log.Printf("%s: %#v\n", action.Name, action.CategoryLabel)
 			continue
 		}
-
-		if lowercaseLabel == "api" && action.Name == "custom_action" {
-			log.Printf("\n\n\n[DEBUG] FOUND CUSTOM ACTION FOR API LABEL\n\n\n")
-			exactMatch = true
-			selectedAction = action
-			break
-		}
-
 		//log.Printf("FOUND LABELS: %s -> %#v\n", action.Name, action.CategoryLabel)
 
 		for _, label := range action.CategoryLabel {
@@ -3564,6 +3678,10 @@ func GetActionFromLabel(ctx context.Context, app shuffle.WorkflowApp, label stri
 			}
 		}
 	}
+
+	selectedAction.AppName = app.Name
+	selectedAction.AppID = app.ID
+	selectedAction.AppVersion = app.AppVersion
 
 	return selectedAction, selectedCategory, availableLabels
 }
