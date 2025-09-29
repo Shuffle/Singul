@@ -738,8 +738,36 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	}
 
 	// Check the app framework
-	foundAppType := value.Category
+	foundAppType := strings.ToLower(value.Category)
 	foundCategory := shuffle.Category{}
+
+	// Automap it IF it is pre-defined
+	if (foundAppType == "" || strings.ToLower(foundAppType) == "singul") && value.AppName == "" && len(value.Label) > 0 {
+		log.Printf("[INFO] No category set, no app set, but label set in category action. Trying to automap label %s", value.Label)
+
+		categories := shuffle.GetAppCategories() 
+
+		parsedLabel := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value.Label)), " ", "_")
+		for _, category := range categories {
+
+			for _, label := range category.ActionLabels {
+				parsedInnerLabel := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(label)), " ", "_")
+
+				if parsedInnerLabel != parsedLabel {
+					continue
+				}
+
+				foundAppType = strings.ToLower(category.Name)
+				log.Printf("[INFO] Mapped label %s to category %s in category action", value.Label, foundAppType)
+				break
+			}
+
+			if len(foundAppType) > 0 {
+				break
+			}
+		}
+	}
+
 	if foundAppType == "cases" {
 		foundCategory = org.SecurityFramework.Cases
 	} else if foundAppType == "communication" {
@@ -797,7 +825,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		return jsonBytes, nil
 	} else {
 		if len(foundCategory.Name) > 0 {
-			log.Printf("[DEBUG] Found app for category %s: %s (%s)", foundAppType, foundCategory.Name, foundCategory.ID)
+			if debug { 
+				log.Printf("[DEBUG] Found app for category %s: %s (%s)", foundAppType, foundCategory.Name, foundCategory.ID)
+			}
+
+			// foundCategory.ID => appid => always an md5 
+			if len(foundCategory.ID) == 32 {
+				value.AppName = foundCategory.Name
+			}
 		}
 	}
 
@@ -892,12 +927,12 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		log.Printf("[WARNING] Couldn't find app with ID or name '%s' active in org %s (%s)", value.AppName, user.ActiveOrg.Name, user.ActiveOrg.Id)
 		failed := true
 
-		if shuffle.GetProject().Environment == "cloud" {
+		if shuffle.GetProject().Environment == "cloud" && len(value.AppName) > 0 {
 			foundApp, err := shuffle.HandleAlgoliaAppSearch(ctx, value.AppName)
 			if err != nil {
 				log.Printf("[ERROR] Failed getting app with ID or name '%s' in category action: %s", value.AppName, err)
 			} else if err == nil && len(foundApp.ObjectID) > 0 {
-				log.Printf("[INFO] Found app %s (%s) for name %s in Algolia", foundApp.Name, foundApp.ObjectID, value.AppName)
+				log.Printf("[INFO] Found app %s (%s) for name '%s' in Algolia", foundApp.Name, foundApp.ObjectID, value.AppName)
 
 				if !standalone {
 					tmpApp, err := shuffle.GetApp(ctx, foundApp.ObjectID, user, false)
@@ -2133,7 +2168,12 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			// SKIP_VALIDATION=true
 
 			// Curious testing to see "body" field-injection
-			missingBodyParams := validatePreparedActionHasFields(preparedAction, value.Fields)
+			missingBodyParams := validatePreparedActionHasFields(preparedAction, value.Fields, i)
+
+			// FIXME: How to deal with random fields here?
+			log.Printf("\n\n\nMISSING PARAMS: %#v\n\n\n", missingBodyParams)
+			//os.Exit(3)
+
 			if len(missingBodyParams) > 0 {
 
 				if debug { 
@@ -2167,110 +2207,108 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					}
 				}
 
-				log.Printf("RESP BODY:\n%s", string(apprunBody))
+				log.Printf("NEW APPRUN BODY:\n%s", string(apprunBody))
+
+			} 
+
+			// Standalone => runs the app, but as a "subflow", which locally 
+			// directly executes the python script
+			if standalone { 
+				unmarshalledAction := shuffle.Action{}
+				err = json.Unmarshal(preparedAction, &unmarshalledAction)
+				if err != nil {
+					log.Printf("[ERROR] Failed unmarshalling action in category run for app %s: %s", secondAction.AppID, err)
+				}
+
+				parentWorkflow.Actions = []shuffle.Action{
+					unmarshalledAction,
+				}
+
+				unparsedBody, err := handleStandaloneExecution(parentWorkflow)
+				if err != nil {
+					log.Printf("[ERROR] Failed running standalone execution: %s", err)
+					return nil, err
+				}
+
+				// This is the format used in subflow executions, so we just pretend to be the same
+				preparedResponse := shuffle.SubflowData{
+					Success: 	 true,
+					Result: 	 string(unparsedBody),
+					ResultSet: true, 
+				}
+
+				apprunBody, err = json.Marshal(preparedResponse)
+				if err != nil {
+					log.Printf("[ERROR] Failed marshalling response for standalone execution: %s", err)
+				}
+
 
 			} else {
-
-				// Standalone => runs the app, but as a "subflow", which locally 
-				// directly executes the python script
-				if standalone { 
-					unmarshalledAction := shuffle.Action{}
-					err = json.Unmarshal(preparedAction, &unmarshalledAction)
-					if err != nil {
-						log.Printf("[ERROR] Failed unmarshalling action in category run for app %s: %s", secondAction.AppID, err)
-					}
-
-					parentWorkflow.Actions = []shuffle.Action{
-						unmarshalledAction,
-					}
-
-					unparsedBody, err := handleStandaloneExecution(parentWorkflow)
-					if err != nil {
-						log.Printf("[ERROR] Failed running standalone execution: %s", err)
-						return nil, err
-					}
-
-					// This is the format used in subflow executions, so we just pretend to be the same
-					preparedResponse := shuffle.SubflowData{
-						Success: 	 true,
-						Result: 	 string(unparsedBody),
-						ResultSet: true, 
-					}
-
-					apprunBody, err = json.Marshal(preparedResponse)
-					if err != nil {
-						log.Printf("[ERROR] Failed marshalling response for standalone execution: %s", err)
-					}
-
-
+				// Sends back how many translations happened
+				// -url is just for the app to parse it :(
+				attemptString := "x-translation-attempt-url"
+				if _, ok := resp.Header()[attemptString]; ok {
+					resp.Header().Set(attemptString, fmt.Sprintf("%d", i+1))
 				} else {
-					// Sends back how many translations happened
-					// -url is just for the app to parse it :(
-					attemptString := "x-translation-attempt-url"
-					if _, ok := resp.Header()[attemptString]; ok {
-						resp.Header().Set(attemptString, fmt.Sprintf("%d", i+1))
-					} else {
-						resp.Header().Add(attemptString, fmt.Sprintf("%d", i+1))
+					resp.Header().Add(attemptString, fmt.Sprintf("%d", i+1))
+				}
+
+				if debug { 
+					log.Printf("\n\n[DEBUG] Attempt preparedAction (url: %s): %s\n\n", apprunUrl, string(preparedAction))
+				}
+
+				req, err := http.NewRequest(
+					"POST",
+					apprunUrl,
+					bytes.NewBuffer(preparedAction),
+				)
+
+				if err != nil {
+					log.Printf("[WARNING] Error in new request for execute generated app run (1): %s", err)
+					respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed preparing new request. Contact support."}`))
+					resp.WriteHeader(500)
+					resp.Write(respBody)
+					return respBody, err
+				}
+
+				for key, value := range request.Header {
+					if len(value) == 0 {
+						continue
 					}
 
-					if debug { 
-						log.Printf("\n\n[DEBUG] Attempt preparedAction (url: %s): %s\n\n", apprunUrl, string(preparedAction))
-					}
+					req.Header.Add(key, value[0])
+				}
 
-					log.Printf("PREPARED ACTION: %s", string(preparedAction))
-					req, err := http.NewRequest(
-						"POST",
-						apprunUrl,
-						bytes.NewBuffer(preparedAction),
-					)
+				newresp, err := client.Do(req)
+				if err != nil {
+					log.Printf("[WARNING] Error running body for execute generated app run (2): %s", err)
+					respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running generated app. Contact support."}`))
+					resp.WriteHeader(500)
+					resp.Write(respBody)
+					return respBody, err
+				}
 
-					if err != nil {
-						log.Printf("[WARNING] Error in new request for execute generated app run (1): %s", err)
-						respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed preparing new request. Contact support."}`))
-						resp.WriteHeader(500)
-						resp.Write(respBody)
-						return respBody, err
-					}
+				// Ensures frontend has something to debug if things go wrong
+				for key, value := range newresp.Header {
+					if strings.HasSuffix(strings.ToLower(key), "-url") {
 
-					for key, value := range request.Header {
-						if len(value) == 0 {
-							continue
-						}
-
-						req.Header.Add(key, value[0])
-					}
-
-					newresp, err := client.Do(req)
-					if err != nil {
-						log.Printf("[WARNING] Error running body for execute generated app run (2): %s", err)
-						respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running generated app. Contact support."}`))
-						resp.WriteHeader(500)
-						resp.Write(respBody)
-						return respBody, err
-					}
-
-					// Ensures frontend has something to debug if things go wrong
-					for key, value := range newresp.Header {
-						if strings.HasSuffix(strings.ToLower(key), "-url") {
-
-							// Remove old ones with the same key
-							if _, ok := resp.Header()[key]; ok {
-								resp.Header().Set(key, value[0])
-							} else {
-								resp.Header().Add(key, value[0])
-							}
+						// Remove old ones with the same key
+						if _, ok := resp.Header()[key]; ok {
+							resp.Header().Set(key, value[0])
+						} else {
+							resp.Header().Add(key, value[0])
 						}
 					}
+				}
 
-					defer newresp.Body.Close()
-					apprunBody, err = ioutil.ReadAll(newresp.Body)
-					if err != nil {
-						log.Printf("[WARNING] Failed reading body for execute generated app run (3): %s", err)
-						respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed unmarshalling app response. Contact support."}`))
-						resp.WriteHeader(500)
-						resp.Write(respBody)
-						return respBody, err
-					}
+				defer newresp.Body.Close()
+				apprunBody, err = ioutil.ReadAll(newresp.Body)
+				if err != nil {
+					log.Printf("[WARNING] Failed reading body for execute generated app run (3): %s", err)
+					respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed unmarshalling app response. Contact support."}`))
+					resp.WriteHeader(500)
+					resp.Write(respBody)
+					return respBody, err
 				}
 			}
 
@@ -2959,7 +2997,7 @@ func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.Ca
 
 // Checks if all input fields are in the action or not.
 // This just uses the value, and looks for what may be missing
-func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Valuereplace) map[string]string {
+func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Valuereplace, parentIndex int) map[string]string {
 	missingFieldsInBody := map[string]string{}
 	if os.Getenv("SKIP_VALIDATION") == "true" {
 		if debug {
@@ -2967,6 +3005,11 @@ func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Val
 		}
 
 		return missingFieldsInBody
+	}
+
+	// FIXME: Hack to only validate the first action
+	if parentIndex > 0 {
+		return map[string]string{}
 	}
 
 	unmarshalledAction := shuffle.Action{}
@@ -3003,7 +3046,7 @@ func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Val
 		if !valueFound {
 			// FIXME: Question here is: can we in theory just inject it?
 			if debug { 
-				log.Printf("\n\n\n[WARNING] Debug: Field '%s' with value '%s' not found in prepared action for app %s action %s\n\n\n", field.Key, field.Value, unmarshalledAction.AppID, unmarshalledAction.Name)
+				log.Printf("[ERROR] Debug: Field '%s' with value '%s' not found in prepared action for app %s action %s", field.Key, field.Value, unmarshalledAction.AppID, unmarshalledAction.Name)
 			}
 
 			missingFieldsInBody[field.Key] = field.Value
