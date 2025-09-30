@@ -2160,6 +2160,15 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			Result: `{"success": true,"status": 400, "body": "Not all fields have been filled. Ensure the following fields are inputted in the right field, in the right format. If fields are escaped, fix them. | is the split key: `,
 		}
 
+		// Add header about the selected app
+		if len(selectedApp.Name) > 0 {
+			resp.Header().Set("x-appname", selectedApp.Name)
+		}
+
+		if len(selectedApp.ID) > 0 {
+			resp.Header().Set("x-appid", selectedApp.ID)
+		}
+
 		for i := 0; i < maxAttempts; i++ {
 
 			// This is an autocorrective measure to ensure ALL fields
