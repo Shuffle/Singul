@@ -300,6 +300,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 		authConfig = ""
 	}
 
+
 	// Remapping into non-list JSON blob
 	newMap := map[string]interface{}{}
 	for _, field := range value.Fields {
@@ -328,6 +329,10 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 	// https://github.com/Shuffle/standards/tree/main/translation_standards
 	if strings.ToLower(value.Label) == "ocsf" {
 		value.Label = "ticket"
+	}
+
+	if debug { 
+		log.Printf("[DEBUG] Translating label %s with body:\n%s\n\n", value.Label, string(marshalledFields))
 	}
 
 	// Is there any way to ingest these as well? 
@@ -422,15 +427,15 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 		for cnt, item := range foundArray {
 			// Check if uid, uuid, id or similar is a valid key
 			if _, ok := item.(map[string]interface{}); !ok {
-				log.Printf("[WARNING] Item in list output for label %s is not a map: %#v", value.Label, item)
+				log.Printf("[ERROR] Item in Singul list output for label %s is not a map: %#v", value.Label, item)
 				continue
 			}
 
 			generatedItem := item.(map[string]interface{})
 
 			idKeys := []string{"id", "uid", "uuid", "identifier", "key"}
-
 			foundIdentifier := ""
+			foundIdentifierKey := ""
 			for _, idKey := range idKeys {
 				// Check if lower case exists
 				for key, mapValue := range generatedItem {
@@ -441,18 +446,19 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 					// Found the key, set it as the actual label
 					if val, ok := mapValue.(string); ok {
 						foundIdentifier = val
+						foundIdentifierKey = key
 						break
 					} else {
 						log.Printf("[ERROR] Failed finding ID key in item for label %s: %s", value.Label, mapValue)
 					}
 				}
 
-				if foundIdentifier != "" {
+				if foundIdentifier != "" && len(foundIdentifier) > 4 {
 					break
 				}
 			}
 
-			// hardcoded override for product name
+			// hardcoded override for product name. Just a test.
 			toolKeys := []string{"product", "tool", "service", "application", "app"}
 			if len(secondAction.AppName) > 0 { 
 				for _, toolKey := range toolKeys {
@@ -471,9 +477,29 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 				}
 			}
 
-			if len(foundIdentifier) == 0 {
-				log.Printf("[ERROR] Failed finding ID key in item for label %s: %#v", value.Label, item)
-				break
+			// Generate an ID if we didn't find one
+			if len(foundIdentifier) <= 4 {
+				log.Printf("[ERROR] Failed finding VALID ID key in item for label %s: %#v. ID Key: %s, Value: %s", value.Label, item, foundIdentifierKey, foundIdentifier)
+
+				marshalledItem, err := json.Marshal(generatedItem)
+				if err != nil {
+					log.Printf("[ERROR] Failed marshalling item in schemaless output for label %s: %s", value.Label, err)
+					break
+				} else {
+					foundIdentifier = fmt.Sprintf("%x", md5.Sum(marshalledItem))
+					log.Printf("MARSHALLED OCSF (%s):\n%s\n", foundIdentifier, string(marshalledItem))
+				}
+			}
+
+			// In case it finds some weird thingy
+			if len(foundIdentifier) > 36 {
+				// md5 sum it
+				foundIdentifier = fmt.Sprintf("%x", md5.Sum([]byte(foundIdentifier)))
+			}
+
+			// Overrides the key that is being ingested
+			if len(foundIdentifierKey) > 0 && len(foundIdentifier) > 0 {
+				generatedItem[foundIdentifierKey] = foundIdentifier
 			}
 
 			// Check if we have already uploaded it recently based on identifier
@@ -490,7 +516,8 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 
 			shuffle.SetCache(ctx, cacheKey, []byte("true"), 60*60*24*3) // 3 days
 
-			marshalledBody, err := json.Marshal(item)
+			//marshalledBody, err := json.Marshal(item)
+			marshalledBody, err := json.Marshal(generatedItem)
 			if err != nil {
 				log.Printf("[ERROR] Failed marshalling item in schemaless output for label %s: %s", value.Label, err)
 				continue
@@ -2672,7 +2699,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 				// Handles the actual uploading itself
 				if len(foundLabelSplit) > 1 && (strings.HasPrefix(value.Label, "list_") || strings.HasPrefix(value.Label, "search_")) && len(curApikey) > 0 && len(curOrg) > 0 {
-
 					autoUploadSingulOutput(ctx, curOrg, curApikey, curBackend, parsedTranslation, value, secondAction)
 				}
 			}
