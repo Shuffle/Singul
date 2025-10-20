@@ -295,9 +295,9 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 	}
 
 	// This isn't good but... :)
-	authConfig := fmt.Sprintf("%s,%s,%s,%s", baseUrl, authorization, user.ActiveOrg.Id, optionalExecutionId)
+	authConfig := fmt.Sprintf("true,%s,%s,%s,%s", baseUrl, authorization, user.ActiveOrg.Id, optionalExecutionId)
 	if standalone {
-		authConfig = ""
+		authConfig = "true"
 	}
 
 
@@ -335,6 +335,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 		log.Printf("[DEBUG] Translating label %s with body:\n%s\n\n", value.Label, string(marshalledFields))
 	}
 
+
 	// Is there any way to ingest these as well? 
 	schemalessOutput, err := schemaless.Translate(ctx, value.Label, marshalledFields, authConfig)
 	if err != nil {
@@ -370,6 +371,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 				curOrg = fmt.Sprintf("execution:%s", newExecutionId)
 			}
 
+			log.Printf("\n\n\nSINGUL UPLOAD (2)\n\n\n")
 			autoUploadSingulOutput(
 				ctx, 
 				curOrg, 
@@ -487,7 +489,6 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 					break
 				} else {
 					foundIdentifier = fmt.Sprintf("%x", md5.Sum(marshalledItem))
-					log.Printf("MARSHALLED OCSF (%s):\n%s\n", foundIdentifier, string(marshalledItem))
 				}
 			}
 
@@ -2615,9 +2616,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 
 			// No shuffler.io config for standalone runs
-			authConfig := fmt.Sprintf("%s,%s,%s,%s", baseUrl, authorization, orgId, optionalExecutionId)
+			authConfig := fmt.Sprintf("false,%s,%s,%s,%s", baseUrl, authorization, orgId, optionalExecutionId)
 			if standalone {
-				authConfig = ""
+				authConfig = "false"
 			}
 
 			outputmap := make(map[string]interface{})

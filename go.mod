@@ -9,9 +9,9 @@ toolchain go1.24.4
 
 require (
 	github.com/frikky/kin-openapi v0.42.0
-	github.com/frikky/schemaless v0.0.21
+	github.com/frikky/schemaless v0.0.22
 	github.com/satori/go.uuid v1.2.0
-	github.com/shuffle/shuffle-shared v0.9.30
+	github.com/shuffle/shuffle-shared v0.9.31
 	github.com/spf13/cobra v1.9.1
 )
 
