@@ -672,6 +672,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		value.AppName = ""
 	}
 
+	if strings.ToLower(value.AppName) == "http"  {
+		value.AppName = ""
+	}
+
 	foundIndex := -1
 	labelIndex := -1
 	if len(value.Category) > 0 {
@@ -698,6 +702,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	_ = labelIndex
 
+
 	// WITHOUT finding the app first
 	if len(value.Category) == 0 && len(value.AppName) == 0 && len(value.AppId) == 0 && (value.Label == "api" || value.Label == "custom_action" || value.Action == "custom_action") {
 		log.Printf("[INFO] Got Singul 'custom action' request WITHOUT app. Mapping to HTTP 1.4.0.")
@@ -705,6 +710,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		value.AppVersion = "1.4.0"
 		value.Label = "GET"
 		value.Action = "GET"
+
+		parsedBody := make(map[string]interface{})
 
 		newFields := []shuffle.Valuereplace{}
 		for _, field := range value.Fields {
@@ -714,7 +721,59 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				continue
 			}
 
+			if strings.ToLower(field.Key) == "body" {
+				// Try to unmarshal it 
+				err := json.Unmarshal([]byte(field.Value), &parsedBody)
+				if err == nil {
+					log.Printf("[INFO] Mapped body field to HTTP custom action body")
+				}
+			}
+
 			newFields = append(newFields, field)
+		}
+
+		// Extra mapping handlers. This is in case the incomg data was in a weird format
+		// LLMs do be unstructured (:
+		parsedNewfields := []shuffle.Valuereplace{}
+		for key, originalVal := range parsedBody {
+			val := ""
+			if foundVal, ok := originalVal.(string); ok {
+				val = foundVal
+			} else if foundVal, ok := originalVal.(float64); ok {
+				val = fmt.Sprintf("%f", foundVal)
+			} else if foundVal, ok := originalVal.(bool); ok {
+				val = fmt.Sprintf("%t", foundVal)
+			} else if foundVal, ok := originalVal.(int); ok {
+				val = fmt.Sprintf("%d", foundVal)
+			} else {
+				marshalledVal, err := json.Marshal(originalVal)
+				if err != nil {
+					log.Printf("[WARNING] Skipping field %s in HTTP custom action due to unmarshalable value: %#v", key, originalVal)
+					continue
+				} else {
+					val = string(marshalledVal)
+				}
+			}
+
+			if len(val) == 0 {
+				log.Printf("[WARNING] Singul - Skipping empty field %s in HTTP custom action", key)
+				continue
+			}
+
+			if strings.ToLower(key) == "method" {
+				value.Label = strings.ToUpper(val)
+				value.Action = value.Label
+				continue
+			}
+
+			parsedNewfields = append(parsedNewfields, shuffle.Valuereplace{
+				Key:   key,
+				Value: val,
+			})
+		}
+
+		if len(parsedNewfields) > 0 {
+			newFields = parsedNewfields
 		}
 
 		value.Fields = newFields
