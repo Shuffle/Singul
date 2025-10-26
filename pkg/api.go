@@ -706,77 +706,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	// WITHOUT finding the app first
 	if len(value.Category) == 0 && len(value.AppName) == 0 && len(value.AppId) == 0 && (value.Label == "api" || value.Label == "custom_action" || value.Action == "custom_action") {
 		log.Printf("[INFO] Got Singul 'custom action' request WITHOUT app. Mapping to HTTP 1.4.0.")
-		value.AppName = "HTTP"
-		value.AppVersion = "1.4.0"
-		value.Label = "GET"
-		value.Action = "GET"
 
-		parsedBody := make(map[string]interface{})
-
-		newFields := []shuffle.Valuereplace{}
-		for _, field := range value.Fields {
-			if strings.ToLower(field.Key) == "method" {
-				value.Label = strings.ToUpper(field.Value)
-				value.Action = value.Label
-				continue
-			}
-
-			if strings.ToLower(field.Key) == "body" {
-				// Try to unmarshal it 
-				err := json.Unmarshal([]byte(field.Value), &parsedBody)
-				if err == nil {
-					log.Printf("[INFO] Mapped body field to HTTP custom action body")
-				}
-			}
-
-			newFields = append(newFields, field)
-		}
-
-		// Extra mapping handlers. This is in case the incomg data was in a weird format
-		// LLMs do be unstructured (:
-		parsedNewfields := []shuffle.Valuereplace{}
-		for key, originalVal := range parsedBody {
-			val := ""
-			if foundVal, ok := originalVal.(string); ok {
-				val = foundVal
-			} else if foundVal, ok := originalVal.(float64); ok {
-				val = fmt.Sprintf("%f", foundVal)
-			} else if foundVal, ok := originalVal.(bool); ok {
-				val = fmt.Sprintf("%t", foundVal)
-			} else if foundVal, ok := originalVal.(int); ok {
-				val = fmt.Sprintf("%d", foundVal)
-			} else {
-				marshalledVal, err := json.Marshal(originalVal)
-				if err != nil {
-					log.Printf("[WARNING] Skipping field %s in HTTP custom action due to unmarshalable value: %#v", key, originalVal)
-					continue
-				} else {
-					val = string(marshalledVal)
-				}
-			}
-
-			if len(val) == 0 {
-				log.Printf("[WARNING] Singul - Skipping empty field %s in HTTP custom action", key)
-				continue
-			}
-
-			if strings.ToLower(key) == "method" {
-				value.Label = strings.ToUpper(val)
-				value.Action = value.Label
-				continue
-			}
-
-			parsedNewfields = append(parsedNewfields, shuffle.Valuereplace{
-				Key:   key,
-				Value: val,
-			})
-		}
-
-		if len(parsedNewfields) > 0 {
-			newFields = parsedNewfields
-		}
-
-		value.Fields = newFields
+		value = GetUpdatedHttpValue(value)
 	}
 
 	var err error
@@ -1137,7 +1068,51 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		// Special handler for url -> path mapping
 		if selectedAction.Name != "custom_action" { 
-			log.Printf("[ERROR] Couldn't find custom_action in app %s (%s). Does it need a rebuild? SHOULD be returning.", selectedApp.Name, selectedApp.ID)
+			log.Printf("[ERROR] Couldn't find custom_action in app %s (%s). Does it need a rebuild? SHOULD be returning. Failover to HTTP request.", selectedApp.Name, selectedApp.ID)
+			selectedApp = shuffle.WorkflowApp{
+				Name: "HTTP",
+				AppVersion: "1.4.0",
+			}
+			value = GetUpdatedHttpValue(value)
+
+			if shuffle.GetProject().Environment == "cloud" {
+				foundApp, err := shuffle.HandleAlgoliaAppSearch(ctx, "HTTP")
+				if err == nil && len(foundApp.ObjectID) > 0 {
+					foundAppObject, err := shuffle.GetApp(ctx, foundApp.ObjectID, user, false)
+					if err == nil {
+						selectedApp = *foundAppObject
+					} else {
+						log.Printf("[ERROR] Failed getting app details for HTTP app in category action: %s. Name %s (%s) (2)", err, foundApp.Name, foundApp.ObjectID)
+					}
+				} else {
+					log.Printf("[ERROR] Failed getting app with ID or name 'HTTP' in category action: %s. Name: %s (%s)", err, foundApp.Name, foundApp.ObjectID)
+				}
+			}
+
+			if len(selectedApp.Actions) == 0 { 
+				selectedApp.Actions = []shuffle.WorkflowAppAction{
+					shuffle.WorkflowAppAction{
+						Name:		  value.Label,
+						ID:           value.Label,
+						Parameters:    []shuffle.WorkflowAppActionParameter{
+							shuffle.WorkflowAppActionParameter{
+								Name:        "url",
+								Required:    true,
+							},
+							shuffle.WorkflowAppActionParameter{
+								Name:        "headers",
+							},
+						},
+					},
+				}
+
+				if value.Label == "POST" || value.Label == "PUT" || value.Label == "PATCH" {
+					selectedApp.Actions[0].Parameters = append(selectedApp.Actions[0].Parameters, shuffle.WorkflowAppActionParameter{
+						Name:        "body",
+					})
+				}
+			}
+
 		} else {
 			pathIndex := -1 
 			urlIndex := -1
@@ -3020,6 +2995,82 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	resp.WriteHeader(200)
 	resp.Write(jsonParsed)
 	return jsonParsed, nil
+}
+
+// Auto-parser of incoming data if not handle-able otherwise
+func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
+	value.AppName = "HTTP"
+	value.AppVersion = "1.4.0"
+	value.Label = "GET"
+	value.Action = "GET"
+
+	parsedBody := make(map[string]interface{})
+
+	newFields := []shuffle.Valuereplace{}
+	for _, field := range value.Fields {
+		if strings.ToLower(field.Key) == "method" {
+			value.Label = strings.ToUpper(field.Value)
+			value.Action = value.Label
+			continue
+		}
+
+		if strings.ToLower(field.Key) == "body" {
+			// Try to unmarshal it 
+			err := json.Unmarshal([]byte(field.Value), &parsedBody)
+			if err == nil {
+				log.Printf("[INFO] Mapped body field to HTTP custom action body")
+			}
+		}
+
+		newFields = append(newFields, field)
+	}
+
+	// Extra mapping handlers. This is in case the incomg data was in a weird format
+	// LLMs do be unstructured (:
+	parsedNewfields := []shuffle.Valuereplace{}
+	for key, originalVal := range parsedBody {
+		val := ""
+		if foundVal, ok := originalVal.(string); ok {
+			val = foundVal
+		} else if foundVal, ok := originalVal.(float64); ok {
+			val = fmt.Sprintf("%f", foundVal)
+		} else if foundVal, ok := originalVal.(bool); ok {
+			val = fmt.Sprintf("%t", foundVal)
+		} else if foundVal, ok := originalVal.(int); ok {
+			val = fmt.Sprintf("%d", foundVal)
+		} else {
+			marshalledVal, err := json.Marshal(originalVal)
+			if err != nil {
+				log.Printf("[WARNING] Skipping field %s in HTTP custom action due to unmarshalable value: %#v", key, originalVal)
+				continue
+			} else {
+				val = string(marshalledVal)
+			}
+		}
+
+		if len(val) == 0 {
+			log.Printf("[WARNING] Singul - Skipping empty field %s in HTTP custom action", key)
+			continue
+		}
+
+		if strings.ToLower(key) == "method" {
+			value.Label = strings.ToUpper(val)
+			value.Action = value.Label
+			continue
+		}
+
+		parsedNewfields = append(parsedNewfields, shuffle.Valuereplace{
+			Key:   key,
+			Value: val,
+		})
+	}
+
+	if len(parsedNewfields) > 0 {
+		newFields = parsedNewfields
+	}
+
+	value.Fields = newFields
+	return value
 }
 
 func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.CacheKeyData, apikey, orgId, backendUrl string) error {
