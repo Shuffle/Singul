@@ -1674,6 +1674,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		AppName:     selectedApp.Name,
 		AppVersion:  selectedApp.AppVersion,
 		AppID:       selectedApp.ID,
+		Description: selectedAction.Description,
 		Environment: environment,
 		IsStartNode: true,
 		ID:          uuid.NewV4().String(),
@@ -2249,7 +2250,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			missingBodyParams := validatePreparedActionHasFields(preparedAction, value.Fields, i)
 
 			// FIXME: How to deal with random fields here?
-			log.Printf("\n\n\nMISSING PARAMS: %#v\n\n\n", missingBodyParams)
+			if debug { 
+				log.Printf("\n\n\nMISSING PARAMS: %#v\n\n\n", missingBodyParams)
+			}
 			//os.Exit(3)
 
 			if len(missingBodyParams) > 0 {
@@ -2727,7 +2730,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 				// Conclusion: The /api/v1/datastore API needs to support execution auth
 
-				if len(curApikey) == 0 || len(curBackend) == 0 || len(curOrg) == 0 {
+				if request != nil && request.URL != nil && (len(curApikey) == 0 || len(curBackend) == 0 || len(curOrg) == 0) {
 					newAuth := request.URL.Query().Get("authorization")
 					if len(newAuth) > 0 {
 						curApikey = newAuth
@@ -3145,12 +3148,15 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.Action) shu
 				}
 			}
 
-			log.Printf("[DEBUG] Appending '%s' with value %#v", customActionParam.Name, customActionParam.Value)
+			if debug { 
+				log.Printf("[DEBUG] Appending '%s' with value %#v", customActionParam.Name, customActionParam.Value)
+			}
+
 			action.Parameters = append(action.Parameters, customActionParam)
 
 		}
 	}
-			
+
 	action.Name = "custom_action"
 	return action
 }
@@ -3790,10 +3796,17 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 	}
 
 	pythonPath := fmt.Sprintf("%s/bin/python3", pythonEnvPath)
-	log.Printf("Pythoncommandsplit: %#v", pythonCommandSplit)
 
 	// Run the command
+	if debug { 
+		log.Printf("Exec start")
+	}
+
 	cmd := exec.Command(pythonPath, pythonCommandSplit...)
+
+	if debug {
+		log.Printf("Exec done")
+	}
 
 	//cmd.Dir = appscriptFolder
 	stdoutPipe, err := cmd.StdoutPipe()
