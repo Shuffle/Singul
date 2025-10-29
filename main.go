@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"github.com/spf13/cobra"
 
-	//"singul/pkg"
 	"github.com/shuffle/singul/pkg"
 	"github.com/shuffle/shuffle-shared"
 )

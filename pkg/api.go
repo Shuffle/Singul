@@ -26,6 +26,9 @@ import (
 	"github.com/frikky/kin-openapi/openapi3"
 )
 
+
+// Runs attempts up to X times
+var maxRerunAttempts = 7
 var standalone = false
 var debug = os.Getenv("DEBUG") == "true"
 var basepath = os.Getenv("SHUFFLE_FILE_LOCATION")
@@ -739,7 +742,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			return respBody, fmt.Errorf("No app name set in category action")
 		}
 
-		relevantApp, err := shuffle.GetSingulApp(basepath, value.AppName)
+		relevantApp, _, err := shuffle.GetAppSingul(basepath, value.AppName)
 		if err != nil {
 			//log.Printf("[WARNING] Failed getting app %s in category action: %s", value.AppName, err)
 			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed getting app %s"}`, value.AppName))
@@ -2133,6 +2136,13 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
+	// Translates from Shuffle Action -> Pure HTTP if possible
+	// This makes for better autocorrects
+	secondAction = GetTranslatedHttpAction(selectedApp, secondAction)
+	log.Printf("Quitting. Action: %s, App: %s", secondAction.Name, secondAction.AppID)
+
+	//os.Exit(3)
+
 	// Runs individual apps, one at a time
 	if value.SkipWorkflow {
 
@@ -2194,9 +2204,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		//resp.Header().Add("execution-url", fmt.Sprintf("/workflows/%s?execution_id=%s", parentWorkflow.ID, optionalExecutionId))
 		resp.Header().Add("x-apprun-url", apprunUrl)
 
-		// Runs attempts up to X times
-		maxAttempts := 5
-
 		//if !standalone { 
 		//	log.Printf("[DEBUG][AI] Sending single API run execution to %s", apprunUrl)
 		//}
@@ -2231,7 +2238,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			resp.Header().Set("x-appid", selectedApp.ID)
 		}
 
-		for i := 0; i < maxAttempts; i++ {
+		for i := 0; i < maxRerunAttempts ; i++ {
 
 			// This is an autocorrective measure to ensure ALL fields
 			// have been filled in accordance to the input from the user.
@@ -2544,11 +2551,12 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			} else {
 				// Parses out data from the output
 				// Reruns the app with the new parameters
-				if debug {
-					log.Printf("[DEBUG] Potential error handling: %#v. Output: %s", httpParseErr, string(apprunBody))
-				}
 
-				if strings.Contains(strings.ToLower(fmt.Sprintf("%s", httpParseErr)), "status: ") {
+				//if debug {
+				//	log.Printf("[DEBUG] Potential error handling: %#v. Output: %s", httpParseErr, string(apprunBody))
+				//}
+
+				if strings.Contains(strings.ToLower(fmt.Sprintf("%s", httpParseErr)), "status") {
 					if debug {
 						log.Printf("[DEBUG] Found status code in schemaless error: %s", httpParseErr)
 					}
@@ -2613,7 +2621,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 							log.Printf("[ERROR] Problem in autocorrect (%d):\n%#v\nParams: %d", i, err, len(outputAction.Parameters))
 						}
 
-						if i < maxAttempts-1 {
+						if i < maxRerunAttempts-1 {
 							continue
 						} else {
 							resp.WriteHeader(400)
@@ -2995,6 +3003,156 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	resp.WriteHeader(200)
 	resp.Write(jsonParsed)
 	return jsonParsed, nil
+}
+
+// Translates and action IF custom_action is available
+// Uses OpenAPI spec to do so
+func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.Action) shuffle.Action {
+	if app.ID == "" || app.Name == "" {
+		return action
+	}
+
+	// Generated -> openapi spec exists (typically)
+	if !app.Generated {
+		log.Printf("[INFO] NOT Generated. Returning.")
+		return action
+	}
+
+	if action.Name == "custom_action" || action.Name == "api" {
+		return action
+	}
+
+	_, openapiSpec, err := shuffle.GetAppSingul(basepath, action.AppName) 
+	if err != nil || openapiSpec.Info.Title == "" {
+		log.Printf("[WARNING] Failed to load openapi spec for app %s", action.AppName)
+		return action
+	}
+
+	customActionIndex := -1
+	for appActionIndex, appAction := range app.Actions {
+		if appAction.Name == "custom_action" {
+			customActionIndex = appActionIndex
+			break
+		}
+	}
+
+	if customActionIndex == -1 {
+		return action
+	}
+
+
+	// Maybe just force in missing fields first?
+	// That makes it so that e.g. failover can use custom_action while by default we don't... hmm
+	for _, customActionParam := range app.Actions[customActionIndex].Parameters {
+		found := false
+		for _, param := range action.Parameters {
+			if param.Name == customActionParam.Name {
+				found = true
+				break
+			}
+		}
+
+		/*
+		// Definitions
+		newDesc := fmt.Sprintf("%s\n\n%s", path.Get.Description, baseUrl)
+		action := WorkflowAppAction{
+			Description: newDesc,
+			Name:        fmt.Sprintf("%s %s", "Get", path.Get.Summary),
+			Label:       fmt.Sprintf(path.Get.Summary),
+			NodeType:    "action",
+			Environment: api.Environment,
+			Parameters:  extraParameters,
+		}
+		*/
+
+		if !found {
+
+			// FIXME: For now just handles POST due to testing
+			for path, methodData := range openapiSpec.Paths {
+				if methodData.Get != nil {
+					parsedSummary := fmt.Sprintf("get_%s", strings.ReplaceAll(strings.ToLower(methodData.Get.Summary), " ", "_"))
+					if strings.Contains(action.Name, parsedSummary) {
+						if customActionParam.Name == "method" {
+							customActionParam.Value = "GET"
+						}
+
+						if customActionParam.Name == "path" {
+							customActionParam.Value = path
+						}
+
+						break
+					}
+				}
+
+				if methodData.Post != nil {
+					parsedSummary := fmt.Sprintf("post_%s", strings.ReplaceAll(strings.ToLower(methodData.Post.Summary), " ", "_"))
+					if strings.Contains(action.Name, parsedSummary) {
+						if customActionParam.Name == "method" {
+							customActionParam.Value = "POST"
+						}
+
+						if customActionParam.Name == "path" {
+							customActionParam.Value = path
+						}
+
+						break
+					}
+				}
+
+				if methodData.Patch != nil {
+					parsedSummary := fmt.Sprintf("patch_%s", strings.ReplaceAll(strings.ToLower(methodData.Patch.Summary), " ", "_"))
+					if strings.Contains(action.Name, parsedSummary) {
+						if customActionParam.Name == "method" {
+							customActionParam.Value = "PATCH"
+						}
+
+						if customActionParam.Name == "path" {
+							customActionParam.Value = path
+						}
+
+						break
+					}
+				}
+
+				if methodData.Delete != nil {
+					parsedSummary := fmt.Sprintf("delete_%s", strings.ReplaceAll(strings.ToLower(methodData.Delete.Summary), " ", "_"))
+					if strings.Contains(action.Name, parsedSummary) {
+						if customActionParam.Name == "method" {
+							customActionParam.Value = "DELETE"
+						}
+
+						if customActionParam.Name == "path" {
+							customActionParam.Value = path
+						}
+
+						break
+					}
+				}
+
+				if methodData.Put != nil {
+					parsedSummary := fmt.Sprintf("put_%s", strings.ReplaceAll(strings.ToLower(methodData.Put.Summary), " ", "_"))
+					if strings.Contains(action.Name, parsedSummary) {
+						if customActionParam.Name == "method" {
+							customActionParam.Value = "PUT"
+						}
+
+						if customActionParam.Name == "path" {
+							customActionParam.Value = path
+						}
+
+						break
+					}
+				}
+			}
+
+			log.Printf("[DEBUG] Appending '%s' with value %#v", customActionParam.Name, customActionParam.Value)
+			action.Parameters = append(action.Parameters, customActionParam)
+
+		}
+	}
+			
+	action.Name = "custom_action"
+	return action
 }
 
 // Auto-parser of incoming data if not handle-able otherwise
@@ -3611,11 +3769,19 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 		if param.Required || len(param.Value) > 0 { 
 
 			// Will NEED quotes in the future, but the sdk doesn't support it properly...
-			//newCommand := fmt.Sprintf(`--%s='%s'`, param.Name, param.Value)
+			/*
 			newCommand := fmt.Sprintf(`--%s=%s`, param.Name, param.Value)
+			if strings.Contains(param.Value, "\n") || strings.Contains(param.Value, " ") { 
+				newCommand = fmt.Sprintf(`--%s='%s'`, param.Name, param.Value)
+			}
+			*/
+
+			newCommand := fmt.Sprintf(`--%s=%s`, param.Name, param.Value)
+
 			pythonCommandSplit = append(pythonCommandSplit, newCommand)
 		}
 	}
+
 
 	pythonEnvPath, err := Setupvenv(appscriptFolder)	
 	if err != nil {
@@ -3624,6 +3790,7 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 	}
 
 	pythonPath := fmt.Sprintf("%s/bin/python3", pythonEnvPath)
+	log.Printf("Pythoncommandsplit: %#v", pythonCommandSplit)
 
 	// Run the command
 	cmd := exec.Command(pythonPath, pythonCommandSplit...)
@@ -3925,7 +4092,7 @@ func GetLocalAuth() ([]shuffle.AppAuthenticationStorage, error) {
 func AuthenticateAppCli(appname string) error {
 	setupEnv()
 
-	app, err := shuffle.GetSingulApp(basepath, appname) 
+	app, _, err := shuffle.GetAppSingul(basepath, appname) 
 	if err != nil {
 		log.Printf("[ERROR] Failed getting app %s: %s", appname, err)
 		return err
