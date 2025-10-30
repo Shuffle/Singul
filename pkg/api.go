@@ -26,7 +26,6 @@ import (
 	"github.com/frikky/kin-openapi/openapi3"
 )
 
-
 // Runs attempts up to X times
 var maxRerunAttempts = 7
 var standalone = false
@@ -1245,6 +1244,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
+	selectedAction = GetTranslatedHttpAction(selectedApp, selectedAction)
+
 	if len(selectedAction.Name) == 0 && value.Label != "discover_app" {
 		log.Printf("[WARNING] Couldn't find the label '%s' in app '%s'.", value.Label, selectedApp.Name)
 
@@ -1998,9 +1999,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						missingFields = shuffle.RemoveFromArray(missingFields, key)
 					}
 
-					if debug { 
-						log.Printf("[DEBUG] OLD BODY: \n\n%s\n\nNEW BODY: \n\n%s", param.Value, string(marshalledMap))
-					}
+					//if debug { 
+					//	log.Printf("[DEBUG] OLD BODY: \n\n%s\n\nNEW BODY: \n\n%s", param.Value, string(marshalledMap))
+					//}
 
 
 				} else {
@@ -2138,11 +2139,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	}
 
 	// Translates from Shuffle Action -> Pure HTTP if possible
-	// This makes for better autocorrects
-	secondAction = GetTranslatedHttpAction(selectedApp, secondAction)
-	log.Printf("Quitting. Action: %s, App: %s", secondAction.Name, secondAction.AppID)
-
-	//os.Exit(3)
 
 	// Runs individual apps, one at a time
 	if value.SkipWorkflow {
@@ -2250,10 +2246,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			missingBodyParams := validatePreparedActionHasFields(preparedAction, value.Fields, i)
 
 			// FIXME: How to deal with random fields here?
-			if debug { 
+			if debug && len(missingBodyParams) > 0 { 
 				log.Printf("\n\n\nMISSING PARAMS: %#v\n\n\n", missingBodyParams)
 			}
-			//os.Exit(3)
 
 			if len(missingBodyParams) > 0 {
 
@@ -2570,6 +2565,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					// additionalInfo: recursively filled in from this function 
 					// inputQuery: the input we got initially
 					outputString, outputAction, err, additionalInfo := shuffle.FindNextApiStep(
+						value.Fields,
 						secondAction, 
 						apprunBody, 
 						additionalInfo, 
@@ -2769,7 +2765,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 
 		if debug { 
-			log.Printf("\n\n\n[DEBUG] Done in autocorrect loop\n\n\n")
+			log.Printf("[ERROR] Done in autocorrect loop after %d iterations. This means Singul failure for action %s.", maxRerunAttempts, secondAction.Name)
 		}
 	}
 
@@ -3010,7 +3006,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 // Translates and action IF custom_action is available
 // Uses OpenAPI spec to do so
-func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.Action) shuffle.Action {
+//func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.Action) shuffle.Action {
+func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowAppAction) shuffle.WorkflowAppAction {
 	if app.ID == "" || app.Name == "" {
 		return action
 	}
@@ -3021,7 +3018,7 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.Action) shu
 		return action
 	}
 
-	if action.Name == "custom_action" || action.Name == "api" {
+	if action.Name == "custom_action" || action.Name == "api" || action.Name == "" {
 		return action
 	}
 
@@ -3046,6 +3043,20 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.Action) shu
 
 	// Maybe just force in missing fields first?
 	// That makes it so that e.g. failover can use custom_action while by default we don't... hmm
+	allowedApiParameters := []string{"method", "url", "path", "queries", "headers", "body"}
+	newParams := []shuffle.WorkflowAppActionParameter{}
+	for _, param := range action.Parameters {
+		if param.Configuration == false && !shuffle.ArrayContains(allowedApiParameters, strings.ToLower(param.Name)) {
+			continue
+		}
+
+		newParams = append(newParams, param)
+	}
+
+	if len(newParams) != len(action.Parameters) && len(newParams) > 0 {
+		action.Parameters = newParams
+	}
+
 	for _, customActionParam := range app.Actions[customActionIndex].Parameters {
 		found := false
 		for _, param := range action.Parameters {
@@ -3054,6 +3065,7 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.Action) shu
 				break
 			}
 		}
+
 
 		/*
 		// Definitions
@@ -3149,13 +3161,14 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.Action) shu
 			}
 
 			if debug { 
-				log.Printf("[DEBUG] Appending '%s' with value %#v", customActionParam.Name, customActionParam.Value)
+				log.Printf("[DEBUG] Appending '%s' with value %#v (custom_action)", customActionParam.Name, customActionParam.Value)
 			}
 
 			action.Parameters = append(action.Parameters, customActionParam)
 
 		}
 	}
+
 
 	action.Name = "custom_action"
 	return action
@@ -3624,7 +3637,7 @@ func SetupRequirements(requirementsPath string) error {
 			return err
 		}
 
-		// Copy output to buffers
+		// Copy output to buffers -> prints
 		go io.Copy(&stdoutBuf, stdoutPipe)
 		go io.Copy(&stderrBuf, stderrPipe)
 
@@ -3727,15 +3740,14 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 	if len(os.Getenv("SHUFFLE_APP_SDK_TIMEOUT")) == 0 {
 		appTimeout := "30"
 		os.Setenv("SHUFFLE_APP_SDK_TIMEOUT", appTimeout)
-		log.Printf("Set App timeout to %s seconds", appTimeout)
 	}
 
 	returnBody := []byte(fmt.Sprintf(`{"success": false, "reason": "No action taken"}`))
 	if len(workflow.Actions) != 1 {
-		log.Printf("[DEBUG] EXECUTION ACTIONS: %d. CHoosing the LAST node.", len(workflow.Actions))
-		for _, action := range workflow.Actions {
-			log.Printf("[DEBUG] ACTION - Name: %s, Label: %s, AppID: %s", action.Name, action.Label, action.AppID)
-		}
+		//log.Printf("[DEBUG] EXECUTION ACTIONS: %d. CHoosing the LAST node.", len(workflow.Actions))
+		//for _, action := range workflow.Actions {
+		//	log.Printf("[DEBUG] ACTION - Name: %s, Label: %s, AppID: %s", action.Name, action.Label, action.AppID)
+		//}
 
 		workflow.Actions = []shuffle.Action{
 			workflow.Actions[len(workflow.Actions)-1],
@@ -3799,14 +3811,9 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 
 	// Run the command
 	if debug { 
-		log.Printf("Exec start")
+		log.Printf("\n\n\n[DEBUG] START APP EXEC (for timing)\n\n\n")
 	}
-
 	cmd := exec.Command(pythonPath, pythonCommandSplit...)
-
-	if debug {
-		log.Printf("Exec done")
-	}
 
 	//cmd.Dir = appscriptFolder
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -3860,7 +3867,7 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 	}
 
 	if debug { 
-		log.Printf("STDERR1: %s", stderrStr)
+		log.Printf("\n\n\n[DEBUG] DONE APP EXEC (for timing)\n\n\n")
 	}
 
 	record := false

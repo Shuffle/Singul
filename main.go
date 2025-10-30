@@ -198,6 +198,9 @@ var rootCmd = &cobra.Command{
 }
 
 func main() {
+	if debug { 
+		log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	}
 	/*
 	translateData := `{
 	  "fields": {
