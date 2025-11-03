@@ -1163,6 +1163,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	fieldFileContentMap := map[string]interface{}{}
 
 	discoverFile := ""
+
+	// Replaces translation_output & app_defaults -> real input values
 	if len(value.Fields) > 0 {
 		sortedKeys := []string{}
 		for _, field := range value.Fields {
@@ -1771,7 +1773,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		secondAction.AppName = selectedApp.Name
 	}
 
-	selectedAction = GetOrgspecificParameters(ctx, *org, selectedAction)
+	selectedAction = GetOrgspecificParameters(ctx, value.Fields, *org, selectedAction)
 
 	//log.Printf("[DEBUG] Required bodyfields: %#v", selectedAction.RequiredBodyFields)
 	handledRequiredFields := []string{}
@@ -2031,7 +2033,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	authorization := ""
 	optionalExecutionId := ""
 	client := shuffle.GetExternalClient(baseUrl)
-	if len(missingFields) > 0 {
+	if len(missingFields) > 0 && selectedAction.Name != "custom_action" {
 		if debug {
 			log.Printf("[DEBUG] Missing fields for action: %#v. This means the current translation may be missing or wrong. Setting fieldFileFound back to false and re-setting it at the end", missingFields)
 		}
@@ -2143,7 +2145,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	// Runs individual apps, one at a time
 	if value.SkipWorkflow {
 
-		if len(missingFields) > 0 {
+		if len(missingFields) > 0 && selectedAction.Name != "custom_action" {
 			log.Printf("[WARNING] Not all required fields were found in category action (2). Want: %#v in action %s", missingFields, selectedAction.Name)
 			//respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Not all required fields are set", "label": "%s", "missing_fields": "%s", "action": "%s", "api_debugger_url": "%s"}`, value.Label, strings.Join(missingFields, ","), selectedAction.Name, fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID)))
 			//resp.WriteHeader(400)
@@ -2282,9 +2284,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						log.Printf("[ERROR] Failed marshalling prepared body for execute generated app run (1): %s", err)
 					}
 				}
-
-				log.Printf("NEW APPRUN BODY:\n%s", string(apprunBody))
-
 			} 
 
 			// Standalone => runs the app, but as a "subflow", which locally 
@@ -2519,9 +2518,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					*/
 
 					if standalone { 
-						shuffle.UploadParameterBase(context.Background(), user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, param.Name, param.Value)
+						shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, param.Name, param.Value)
 					} else {
-						go shuffle.UploadParameterBase(context.Background(), user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, param.Name, param.Value)
+						go shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, param.Name, param.Value)
 					}
 				}
 
@@ -2702,7 +2701,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						log.Printf("[WARNING] Failed unmarshalling schemaless (2) output for label %s: %s", value.Label, err)
 					}
 				} else {
-					parsedTranslation.Output = outputmap
+					if len(outputmap) > 0 { 
+						parsedTranslation.Output = outputmap
+					}
+
 					//parsedTranslation.RawResponse = nil
 				}
 
@@ -3413,15 +3415,19 @@ func StoreTranslationOutput(user shuffle.User, fieldHash string, parsedParameter
 	if err != nil {
 		log.Printf("[ERROR] Problem with schemaless reversing: %s", err)
 	} else {
-		log.Printf("[DEBUG] Raw schemaless reverse: %s", reversed)
+		if debug { 
+			log.Printf("[DEBUG] Raw schemaless reverse: %s", reversed)
+		}
 
 		finishedFields := 0
 		mappedFields := map[string]interface{}{}
 		err = json.Unmarshal([]byte(reversed), &mappedFields)
 		if err == nil {
 			for _, value := range mappedFields {
-				if _, ok := value.(string); ok && len(value.(string)) > 0 {
-					finishedFields++
+				if _, ok := value.(string); ok {
+					if len(value.(string)) > 0 {
+						finishedFields++
+					}
 				} else {
 					log.Printf("[DEBUG] Found non-string value: %#v", value)
 				}
@@ -3463,7 +3469,9 @@ func StoreTranslationOutput(user shuffle.User, fieldHash string, parsedParameter
 			if err != nil {
 				log.Printf("[ERROR] Problem uploading file: %s", err)
 			} else {
-				log.Printf("[DEBUG] Uploaded file with ID: %s", returnedId)
+				if debug { 
+					log.Printf("[DEBUG] Uploaded file with ID: %s", returnedId)
+				}
 			}
 		}
 	}
@@ -3894,7 +3902,7 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 	return []byte(output), nil
 }
 
-func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuffle.WorkflowAppAction) shuffle.WorkflowAppAction {
+func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace, org shuffle.Org, action shuffle.WorkflowAppAction) shuffle.WorkflowAppAction {
 	//log.Printf("\n\n[DEBUG] LOADING ORG SPECIFIC PARAMETERS\n\n")
 	for paramIndex, param := range action.Parameters {
 		if param.Configuration && param.Name != "url" {
@@ -3936,8 +3944,13 @@ func GetOrgspecificParameters(ctx context.Context, org shuffle.Org, action shuff
 			continue
 		}
 
-		action.Parameters[paramIndex].Value = string(content)
-		action.Parameters[paramIndex].Example = string(content)
+		stringContent := string(content)
+		for _, field := range fields {
+			stringContent = strings.ReplaceAll(stringContent, fmt.Sprintf("{%s}", field.Key), field.Value)
+		}
+
+		action.Parameters[paramIndex].Value = stringContent
+		action.Parameters[paramIndex].Example = stringContent
 	}
 
 	return action
