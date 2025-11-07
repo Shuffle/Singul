@@ -1246,6 +1246,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
+	// "New" way to handle generated apps through pure http
+	originalActionName := selectedAction.Name
 	selectedAction = GetTranslatedHttpAction(selectedApp, selectedAction)
 
 	if len(selectedAction.Name) == 0 && value.Label != "discover_app" {
@@ -1773,7 +1775,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		secondAction.AppName = selectedApp.Name
 	}
 
-	selectedAction = GetOrgspecificParameters(ctx, value.Fields, *org, selectedAction)
+	selectedAction = GetOrgspecificParameters(ctx, value.Fields, *org, selectedAction, originalActionName)
 
 	//log.Printf("[DEBUG] Required bodyfields: %#v", selectedAction.RequiredBodyFields)
 	handledRequiredFields := []string{}
@@ -2245,7 +2247,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			// SKIP_VALIDATION=true
 
 			// Curious testing to see "body" field-injection
-			missingBodyParams := validatePreparedActionHasFields(preparedAction, value.Fields, i)
+			missingBodyParams := validatePreparedActionHasFields(preparedAction, value.Fields, i, originalActionName)
 
 			// FIXME: How to deal with random fields here?
 			if debug && len(missingBodyParams) > 0 { 
@@ -3322,7 +3324,7 @@ func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.Ca
 
 // Checks if all input fields are in the action or not.
 // This just uses the value, and looks for what may be missing
-func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Valuereplace, parentIndex int) map[string]string {
+func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Valuereplace, parentIndex int, originalActionName string) map[string]string {
 	missingFieldsInBody := map[string]string{}
 	if os.Getenv("SKIP_VALIDATION") == "true" {
 		if debug {
@@ -3394,7 +3396,7 @@ func validatePreparedActionHasFields(preparedAction []byte, fields []shuffle.Val
 				continue
 			}
 
-			fileId := fmt.Sprintf("file_parameter_-%s-%s-%s.json", strings.ToLower(unmarshalledAction.AppID), strings.Replace(strings.ToLower(unmarshalledAction.Name), " ", "_", -1), strings.ToLower(param.Name))
+			fileId := fmt.Sprintf("file_parameter_-%s-%s-%s.json", strings.ToLower(unmarshalledAction.AppID), strings.Replace(strings.ToLower(originalActionName), " ", "_", -1), strings.ToLower(param.Name))
 
 			category := "app_defaults"
 			if standalone {
@@ -3596,12 +3598,12 @@ func Setupvenv(appscriptFolder string) (string, error) {
 			return "", err
 		}
 
-		log.Printf("[DEBUG] Make sure to give the python virtual environment executable permissions\nWith: chmod +x %s/bin/python3", absolutePath)
+		log.Printf("[DEBUG] Making sure to give the python virtual environment executable permissions with: chmod +x %s/bin/python3.", absolutePath)
 
 		// wait for user to confirm from input
-		scanner := bufio.NewScanner(os.Stdin)
-		fmt.Printf("[DEBUG] Press Enter to confirm after giving the python virtual environment executable permissions (chmod +x %s/bin/python3): ", absolutePath)
-		scanner.Scan()
+		//scanner := bufio.NewScanner(os.Stdin)
+		//fmt.Printf("[DEBUG] Press Enter to confirm after giving the python virtual environment executable permissions (chmod +x %s/bin/python3): ", absolutePath)
+		//scanner.Scan()
 
 	}
 
@@ -3902,7 +3904,7 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 	return []byte(output), nil
 }
 
-func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace, org shuffle.Org, action shuffle.WorkflowAppAction) shuffle.WorkflowAppAction {
+func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace, org shuffle.Org, action shuffle.WorkflowAppAction, originalActionName string) shuffle.WorkflowAppAction {
 	//log.Printf("\n\n[DEBUG] LOADING ORG SPECIFIC PARAMETERS\n\n")
 	for paramIndex, param := range action.Parameters {
 		if param.Configuration && param.Name != "url" {
@@ -3914,11 +3916,11 @@ func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace
 		}
 
 		//fileId := fmt.Sprintf("file_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(action.Name), " ", "_", -1), strings.ToLower(param.Name))
-		fileId := fmt.Sprintf("file_parameter_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(action.Name), " ", "_", -1), strings.ToLower(param.Name))
+		fileId := fmt.Sprintf("file_parameter_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(originalActionName), " ", "_", -1), strings.ToLower(param.Name))
 
 		// Ensures we load from the correct folder
 		if standalone {
-			fileId = fmt.Sprintf("file_parameter_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(action.Name), " ", "_", -1), strings.ToLower(param.Name))
+			fileId = fmt.Sprintf("file_parameter_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(originalActionName), " ", "_", -1), strings.ToLower(param.Name))
 			fileId = fmt.Sprintf("app_defaults/%s", fileId)
 		}
 

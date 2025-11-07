@@ -148,6 +148,8 @@ func rootCmdRun(cmd *cobra.Command, args []string) {
 	if len(os.Getenv("SHUFFLE_BACKEND")) == 0 {
 		os.Setenv("SHUFFLE_BACKEND", "https://shuffler.io")
 		os.Setenv("SHUFFLE_CLOUDRUN_URL", "https://shuffler.io")
+	} else {
+		os.Setenv("SHUFFLE_CLOUDRUN_URL", os.Getenv("SHUFFLE_BACKEND"))
 	}
 
 	// Ensures Singul runs in "standalone mode"
