@@ -296,12 +296,10 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 		optionalExecutionId = request.URL.Query().Get("execution_id")
 	}
 
-	// This isn't good but... :)
 	authConfig := fmt.Sprintf("true,%s,%s,%s,%s", baseUrl, authorization, user.ActiveOrg.Id, optionalExecutionId)
 	if standalone {
 		authConfig = "true"
 	}
-
 
 	// Remapping into non-list JSON blob
 	newMap := map[string]interface{}{}
@@ -339,10 +337,10 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 
 
 	// Is there any way to ingest these as well? 
-	schemalessOutput, err := schemaless.Translate(ctx, value.Label, marshalledFields, authConfig)
+	schemalessOutput, schemalessErr := schemaless.Translate(ctx, value.Label, marshalledFields, authConfig)
 	if err != nil {
-		log.Printf("[ERROR] Singul - Failed doing direct translation in category action: %s", err)
-		return nil, err
+		log.Printf("[ERROR] Singul - Failed doing direct translation in category action: %s", schemalessErr)
+		return nil, schemalessErr 
 	}
 
 	// Handles upload of the same value(s)
@@ -597,7 +595,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		if err != nil {
 			log.Printf("[ERROR] Failed doing direct translation: %s", err)
 			resp.WriteHeader(500)
-			respBody = []byte(fmt.Sprintf(`{"success": false, "extra": "Translator ONLY supports valid JSON.", "reason": "Failed doing direct translation: %s. Contact support@shuffler.io if this persists."}`, err))
+			respBody = []byte(fmt.Sprintf(`{"success": false, "extra": "PS: Translator ONLY supports valid JSON.", "reason": "Failed doing direct translation: %s. Contact support@shuffler.io if this persists."}`, err))
 		} else {
 			resp.WriteHeader(200)
 		}
