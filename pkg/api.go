@@ -3023,9 +3023,8 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 	if action.Name == "custom_action" || action.Name == "api" || action.Name == "" {
 		return action
 	}
-
-	_, openapiSpec, err := shuffle.GetAppSingul(basepath, action.AppName) 
-	if err != nil || openapiSpec.Info.Title == "" {
+	_, openapiSpec, err := shuffle.GetAppSingul(basepath, action.AppName)
+	if err != nil || openapiSpec == nil || openapiSpec.Info == nil || openapiSpec.Info.Title == "" {
 		log.Printf("[WARNING] Failed to load openapi spec for app %s", action.AppName)
 		return action
 	}
