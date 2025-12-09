@@ -69,7 +69,7 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 			log.Printf("[AUDIT] Api authentication failed in run category action: %s. Normal auth and Execution Auth not found. %#v & %#v", err, authorization, executionId)
 
 			resp.WriteHeader(401)
-			resp.Write([]byte(`{"success": false, "reason": "Authentication failed. Sign up first."}`))
+			resp.Write([]byte(`{"success": false, "reason": "Authentication failed. Please add a Bearer token or log in."}`))
 			return
 		}
 
@@ -144,7 +144,7 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 	if org.Region != backendRegion {
 		log.Printf("[ERROR] Incorrect region for AI request. Backend is in %s", org.Region)
 		resp.WriteHeader(500)
-		resp.Write([]byte(`{"success": false, "reason": "Region was made to the incorrect org"}`))
+		resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Your org is in the wrong region. Preferred region: EU, used: %s"}`, backendRegion)))
 		return
 	}
 
@@ -555,6 +555,32 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 	log.Printf("\n\n\n")
 }
 
+// Custom handler specifically for internal shuffle platform actions (e.g. get_ioc)
+func GetShuffleAction(label string, action shuffle.WorkflowAppAction) shuffle.WorkflowAppAction {
+	if strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(action.AppName), " ", "_"), "-", "_") != "shuffle_tools" && strings.ToLower(action.AppName) != "shuffle" {
+		return action
+	}
+
+	if label == "get_ioc" {
+		action.Name = "get_datastore_value" 
+		action.Parameters = []shuffle.WorkflowAppActionParameter{
+			shuffle.WorkflowAppActionParameter{
+				Name: "key",
+				Value: "{ioc}",
+				Description: "Replace with the IOC value",
+			},
+			shuffle.WorkflowAppActionParameter{
+				Name: "category",
+				Value: "ioc_{ioc_type}",
+				Description: "Replace with the IOC type (ip, domain, url, file)",
+			},
+		}
+	} else {
+		log.Printf("[ERROR] No internal shuffle action found for Singul label '%s'", label)
+	}
+
+	return action
+}
 
 func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.CategoryAction, resp http.ResponseWriter, request *http.Request) ([]byte, error) {
 	// Ensures avoidance of nil-pointers in resp.WriteHeader()
@@ -842,7 +868,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		resp.Write(jsonBytes)
 		return jsonBytes, nil
 	} else {
-		if len(foundCategory.Name) > 0 {
+		if len(foundCategory.Name) > 0 && len(value.AppName) == 0 {
 			if debug { 
 				log.Printf("[DEBUG] Found app for category %s: %s (%s)", foundAppType, foundCategory.Name, foundCategory.ID)
 			}
@@ -853,7 +879,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 		}
 	}
-
 
 	partialMatch := true
 	availableLabels := []string{}
@@ -1247,6 +1272,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	// "New" way to handle generated apps through pure http
 	originalActionName := selectedAction.Name
 	selectedAction = GetTranslatedHttpAction(selectedApp, selectedAction)
+	if debug && originalActionName != selectedAction.Name {
+		log.Printf("[DEBUG] Translated action: %#v => %#v", originalActionName, selectedAction.Name)
+	}
+
+	selectedAction = GetShuffleAction(value.Label, selectedAction)
 
 	if len(selectedAction.Name) == 0 && value.Label != "discover_app" {
 		log.Printf("[WARNING] Couldn't find the label '%s' in app '%s'.", value.Label, selectedApp.Name)
@@ -2227,6 +2257,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			Success: true,
 			Result: `{"success": true,"status": 400, "body": "Not all fields have been filled. Ensure the following fields are inputted in the right field, in the right format. If fields are escaped, fix them. | is the split key: `,
 		}
+		parsedTranslation := shuffle.SchemalessOutput{}
 
 		// Add header about the selected app
 		if len(selectedApp.Name) > 0 {
@@ -2249,7 +2280,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 			// FIXME: How to deal with random fields here?
 			if debug && len(missingBodyParams) > 0 { 
-				log.Printf("\n\n\nMISSING PARAMS: %#v\n\n\n", missingBodyParams)
+				log.Printf("\n\n\nMISSING PARAMS (%s => %s): %#v\n\n\n", originalActionName, secondAction.Name, missingBodyParams)
 			}
 
 			if len(missingBodyParams) > 0 {
@@ -2328,9 +2359,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					resp.Header().Add(attemptString, fmt.Sprintf("%d", i+1))
 				}
 
-				if debug { 
-					log.Printf("\n\n[DEBUG] Attempt preparedAction (url: %s): %s\n\n", apprunUrl, string(preparedAction))
-				}
+				//if debug { 
+				//	log.Printf("\n\n[DEBUG] Attempt preparedAction (url: %s): %s\n\n", apprunUrl, string(preparedAction))
+				//}
 
 				req, err := http.NewRequest(
 					"POST",
@@ -2411,7 +2442,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				return apprunBody, nil
 			}
 
-			parsedTranslation := shuffle.SchemalessOutput{
+			parsedTranslation = shuffle.SchemalessOutput{
 				Success: false,
 				Action:  value.Label,
 
@@ -2554,9 +2585,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				//}
 
 				if strings.Contains(strings.ToLower(fmt.Sprintf("%s", httpParseErr)), "status") {
-					if debug {
-						log.Printf("[DEBUG] Found status code in schemaless error: %s", httpParseErr)
-					}
+					//if debug {
+					//	log.Printf("[DEBUG] Found status code in schemaless error: %s", httpParseErr)
+					//}
 
 					// Passing in:
 					// secondAction: the action we've prepared 
@@ -2622,13 +2653,26 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						if i < maxRerunAttempts-1 {
 							continue
 						} else {
+							parsedTranslation.Retries = maxRerunAttempts
+							parsedTranslation.Success = false
+							parsedTranslation.RawResponse = httpOutput
+							parsedTranslation.Output = httpOutput.Body
+							parsedOutput, err := json.Marshal(parsedTranslation)
+							if err != nil {
+								resp.WriteHeader(400)
+								resp.Write(apprunBody)
+								return apprunBody, err
+							}
+
 							resp.WriteHeader(400)
-							resp.Write(apprunBody)
-							return apprunBody, err
+							resp.Write(parsedOutput)
+							return parsedOutput, err
+
 						}
 					}
 				} else {
-					log.Printf("[ERROR] Failed parsing output in Singul: %s. This may mean that a status code was not found.", httpParseErr)
+					log.Printf("[ERROR] Failed parsing output in Singul: (%s). This may mean that a status code was not found. Success: %#v", httpParseErr, httpOutput)
+					parsedTranslation.RawResponse = string(apprunBody) 
 				}
 
 				marshalledOutput, err := json.Marshal(parsedTranslation)
@@ -2752,6 +2796,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//	parsedTranslation.RawOutput = ""
 			//}
 
+			parsedTranslation.Retries = i + 1
 			marshalledOutput, err := json.Marshal(parsedTranslation)
 			if err != nil {
 				log.Printf("[WARNING] Failed marshalling schemaless output for label %s: %s", value.Label, err)
@@ -2766,9 +2811,24 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		}
 
-		if debug { 
-			log.Printf("[ERROR] Done in autocorrect loop after %d iterations. This means Singul failure for action %s.", maxRerunAttempts, secondAction.Name)
+		log.Printf("[ERROR] Done in autocorrect loop after %d iterations. This means Singul failure for action '%s' in org %s.", maxRerunAttempts, secondAction.Name, user.ActiveOrg.Id)
+
+
+		//parsedHttp, err := json.Marshal(httpOutput)
+		parsedTranslation.Retries = maxRerunAttempts
+		parsedTranslation.Success = false
+		parsedTranslation.RawResponse = httpOutput
+		parsedTranslation.Output = httpOutput.Body
+		parsedOutput, err := json.Marshal(parsedTranslation)
+		if err != nil {
+			resp.WriteHeader(500)
+			resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed marshalling final http output. Contact support."}`)))
+			return nil, errors.New("Failed marshalling final http output")
 		}
+
+		resp.WriteHeader(400)
+		resp.Write(parsedOutput)
+		return parsedOutput, errors.New("Failed running Singul action after multiple attempts")
 	}
 
 	parentWorkflow.Start = secondAction.ID
@@ -2953,7 +3013,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	if len(workflowExecution.ExecutionId) == 0 {
 		log.Printf("[ERROR] Failed running app %s (%s) in org %s (%s). Raw: %s", selectedApp.Name, selectedApp.ID, org.Name, org.Id, string(executionBody))
-		respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed running the app. Contact support@shuffler.io if this persists."}`))
+		respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed finishing Singul translations for app '%s'. Contact support@shuffler.io if this persists."}`, selectedApp.Name))
 		resp.WriteHeader(500)
 		resp.Write(respBody)
 		return respBody, errors.New("Failed running app")
@@ -3016,7 +3076,7 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 
 	// Generated -> openapi spec exists (typically)
 	if !app.Generated {
-		log.Printf("[INFO] NOT Generated. Returning.")
+		//log.Printf("[INFO] NOT Generated. Returning.")
 		return action
 	}
 
@@ -3024,9 +3084,11 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 		return action
 	}
 
+	originalActionName := action.Name
+
 	_, openapiSpec, err := shuffle.GetAppSingul(basepath, action.AppName) 
-	if err != nil || openapiSpec.Info.Title == "" {
-		log.Printf("[WARNING] Failed to load openapi spec for app %s", action.AppName)
+	if err != nil || openapiSpec == nil || openapiSpec.Info == nil || openapiSpec.Info.Title == "" {
+		log.Printf("[ERROR] Failed to load openapi spec for app %s: %s", action.AppName, err)
 		return action
 	}
 
@@ -3052,6 +3114,15 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 			continue
 		}
 
+		// Removes authentication fields
+		if param.Configuration && (param.Value == "" || strings.Contains(strings.ToLower(param.Value), "replace") || strings.Contains(strings.ToLower(param.Value), "example")) {
+			if debug { 
+				log.Printf("[DEBUG] SKIPPING CONFIG PARAM: %#v", param.Name)
+			}
+
+			continue
+		}
+
 		newParams = append(newParams, param)
 	}
 
@@ -3059,6 +3130,7 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 		action.Parameters = newParams
 	}
 
+	originalActionNameFound := false
 	for _, customActionParam := range app.Actions[customActionIndex].Parameters {
 		found := false
 		for _, param := range action.Parameters {
@@ -3088,7 +3160,11 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 			for path, methodData := range openapiSpec.Paths {
 				if methodData.Get != nil {
 					parsedSummary := fmt.Sprintf("get_%s", strings.ReplaceAll(strings.ToLower(methodData.Get.Summary), " ", "_"))
-					if strings.Contains(action.Name, parsedSummary) {
+					if strings.HasPrefix(parsedSummary, "get_get_") {
+						parsedSummary = strings.TrimPrefix(parsedSummary, "get_")
+					}
+
+					if strings.Contains(originalActionName, parsedSummary) {
 						if customActionParam.Name == "method" {
 							customActionParam.Value = "GET"
 						}
@@ -3096,6 +3172,8 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 						if customActionParam.Name == "path" {
 							customActionParam.Value = path
 						}
+	
+						originalActionNameFound = true
 
 						break
 					}
@@ -3103,7 +3181,11 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 
 				if methodData.Post != nil {
 					parsedSummary := fmt.Sprintf("post_%s", strings.ReplaceAll(strings.ToLower(methodData.Post.Summary), " ", "_"))
-					if strings.Contains(action.Name, parsedSummary) {
+					if strings.HasPrefix(parsedSummary, "post_post_") {
+						parsedSummary = strings.TrimPrefix(parsedSummary, "post_")
+					}
+
+					if strings.Contains(originalActionName, parsedSummary) {
 						if customActionParam.Name == "method" {
 							customActionParam.Value = "POST"
 						}
@@ -3112,13 +3194,19 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 							customActionParam.Value = path
 						}
 
+						originalActionNameFound = true
+
 						break
 					}
 				}
 
 				if methodData.Patch != nil {
 					parsedSummary := fmt.Sprintf("patch_%s", strings.ReplaceAll(strings.ToLower(methodData.Patch.Summary), " ", "_"))
-					if strings.Contains(action.Name, parsedSummary) {
+					if strings.HasPrefix(parsedSummary, "patch_patch_") {
+						parsedSummary = strings.TrimPrefix(parsedSummary, "patch_")
+					}
+
+					if strings.Contains(originalActionName, parsedSummary) {
 						if customActionParam.Name == "method" {
 							customActionParam.Value = "PATCH"
 						}
@@ -3127,13 +3215,19 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 							customActionParam.Value = path
 						}
 
+						originalActionNameFound = true
+
 						break
 					}
 				}
 
 				if methodData.Delete != nil {
 					parsedSummary := fmt.Sprintf("delete_%s", strings.ReplaceAll(strings.ToLower(methodData.Delete.Summary), " ", "_"))
-					if strings.Contains(action.Name, parsedSummary) {
+					if strings.HasPrefix(parsedSummary, "delete_delete_") {
+						parsedSummary = strings.TrimPrefix(parsedSummary, "delete_")
+					}
+
+					if strings.Contains(originalActionName, parsedSummary) {
 						if customActionParam.Name == "method" {
 							customActionParam.Value = "DELETE"
 						}
@@ -3142,13 +3236,19 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 							customActionParam.Value = path
 						}
 
+						originalActionNameFound = true
+
 						break
 					}
 				}
 
 				if methodData.Put != nil {
 					parsedSummary := fmt.Sprintf("put_%s", strings.ReplaceAll(strings.ToLower(methodData.Put.Summary), " ", "_"))
-					if strings.Contains(action.Name, parsedSummary) {
+					if strings.HasPrefix(parsedSummary, "put_put_") {
+						parsedSummary = strings.TrimPrefix(parsedSummary, "put_")
+					}
+
+					if strings.Contains(originalActionName, parsedSummary) {
 						if customActionParam.Name == "method" {
 							customActionParam.Value = "PUT"
 						}
@@ -3157,20 +3257,27 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 							customActionParam.Value = path
 						}
 
+						originalActionNameFound = true
+
 						break
 					}
 				}
 			}
 
 			if debug { 
-				log.Printf("[DEBUG] Appending '%s' with value %#v (custom_action)", customActionParam.Name, customActionParam.Value)
+				log.Printf("[DEBUG] Appending '%s' with value %#v (%s => custom_action)", customActionParam.Name, customActionParam.Value, originalActionName)
 			}
 
+			//customActionParam.Value = path
 			action.Parameters = append(action.Parameters, customActionParam)
 
 		}
 	}
 
+	if !originalActionNameFound {
+		log.Printf("[ERROR] Failed to map original action name '%s' to custom_action parameters. Returning original action.", originalActionName)
+		return action
+	}
 
 	action.Name = "custom_action"
 	return action

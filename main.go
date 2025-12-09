@@ -203,6 +203,8 @@ func main() {
 	if debug { 
 		log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	}
+
+	//translatedData := `{"data": "myhost.example.com", "data_type": "domain"}`
 	/*
 	translateData := `{
 	  "fields": {
