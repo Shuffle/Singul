@@ -730,7 +730,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 
 	// WITHOUT finding the app first
-	if len(value.Category) == 0 && len(value.AppName) == 0 && len(value.AppId) == 0 && (value.Label == "api" || value.Label == "custom_action" || value.Action == "custom_action") {
+	if /*len(value.AppName) == 0 &&*/ len(value.Category) == 0  && len(value.AppId) == 0 && (value.Label == "api" || value.Label == "custom_action" || value.Action == "custom_action") {
 		log.Printf("[INFO] Got Singul 'custom action' request WITHOUT app. Mapping to HTTP 1.4.0.")
 
 		value = GetUpdatedHttpValue(value)
@@ -997,18 +997,28 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		// TRY to map it to HTTP and run it automatically
 		if failed {
+			/*
 			foundFields := 0
 
 			value.AppName = "HTTP"
 			value.AppVersion = "1.4.0"
 			value.Label = "GET"
 			value.Action = "GET"
+			*/
 
+			// Ensures we build it in the next section properly
+			// This no longer needs direct error handling in this location
 			selectedApp = shuffle.WorkflowApp{
 				Name: "HTTP",
 				AppVersion: "1.4.0",
+				Actions: []shuffle.WorkflowAppAction{
+					shuffle.WorkflowAppAction{
+						Name: "GET",
+					},
+				},
 			}
 
+			/*
 			if shuffle.GetProject().Environment == "cloud" {
 				foundApp, err := shuffle.HandleAlgoliaAppSearch(ctx, "HTTP")
 				if err == nil && len(foundApp.ObjectID) > 0 {
@@ -1022,6 +1032,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					log.Printf("[ERROR] Failed getting app with ID or name 'HTTP' in category action: %s. Name: %s (%s)", err, foundApp.Name, foundApp.ObjectID)
 				}
 			}
+
+			//func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
 
 			newFields := []shuffle.Valuereplace{}
 			for _, field := range value.Fields {
@@ -1078,6 +1090,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				resp.Write(respBody)
 				return respBody, fmt.Errorf("Failed finding an app with the name or ID '%s'", value.AppName)
 			}
+			*/
 		}
 	}
 
@@ -1188,7 +1201,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	discoverFile := ""
 
 	// Replaces translation_output & app_defaults -> real input values
-	if len(value.Fields) > 0 {
+	if strings.ToLower(selectedAction.AppName) == "http" || selectedAction.Name == "custom_action" || selectedAction.Name == "api" {
+	} else if len(value.Fields) > 0 {
 		sortedKeys := []string{}
 		for _, field := range value.Fields {
 			sortedKeys = append(sortedKeys, field.Key)
@@ -1966,7 +1980,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	// This is to try to automatically remap the fields even before we are to use them
 	// PS: This gets autocorrected AFTER the request has ran, which will be stored
 	// as the mapping for the next runs
-	if len(fieldFileContentMap) > 0 {
+
+	// HTTP goal: Make it NOT use the same variables again for HTTP/custom actions
+
+
+
+	if strings.ToLower(selectedAction.AppName) == "http" || selectedAction.Name == "custom_action" { 
+		log.Printf("[DEBUG] HTTP action. Skipping field content mapping")
+	} else if len(fieldFileContentMap) > 0 {
 		if debug { 
 			log.Printf("[DEBUG] Found file content map (Pre Reverse Schemaless): %#v", fieldFileContentMap)
 		}
@@ -2170,6 +2191,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
+	// log.Printf("[INFO] Action: %#v", secondAction)
+	// os.Exit(1)
 	// Translates from Shuffle Action -> Pure HTTP if possible
 
 	// Runs individual apps, one at a time
@@ -3292,8 +3315,61 @@ func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
 
 	parsedBody := make(map[string]interface{})
 
+	urlFound := false
+	foundUrl := ""
 	newFields := []shuffle.Valuereplace{}
 	for _, field := range value.Fields {
+
+		// Looks for the HTTP 'GET <url>' pattern pre-headers
+		if (strings.Contains(field.Value, "http") && strings.Contains(field.Value, "://") && (strings.Contains(field.Value, "GET") || strings.Contains(field.Value, "POST") || strings.Contains(field.Value, "PUT") || strings.Contains(field.Value, "PATCH") || strings.Contains(field.Value, "DELETE"))) || strings.HasPrefix(field.Value, "{") && strings.HasSuffix(field.Value, "}") {
+			if debug { 
+				log.Printf("[INFO] Skipping and auto-mapping field %s in HTTP custom action due to probable URL+method value: %s", field.Key, field.Value)
+			}
+
+			for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE"} {
+				if strings.Contains(strings.ToUpper(field.Value), method) {
+					value.Label = method
+					value.Action = method
+					break
+				}
+			}
+
+			for _, word := range strings.Split(field.Value, " ") {
+				if strings.HasPrefix(word, "http") && strings.Contains(word, "://") {
+					foundUrl = word
+					break
+				}
+			}
+
+			// Try JSON marshal it and find relevant fields
+			if len(foundUrl) == 0 {
+				mappedFields := map[string]interface{}{}
+				err := json.Unmarshal([]byte(field.Value), &mappedFields)
+				if err == nil {
+					for key, val := range mappedFields {
+						if debug { 
+							log.Printf("[DEBUG] APPENDING FIELD FROM MAPPED FIELDS: %s => %#v", key, val)
+						}
+
+						if key == "url" || key == "uri" {
+							foundUrl = fmt.Sprintf("%v", val)
+						}
+
+						value.Fields = append(value.Fields, shuffle.Valuereplace{
+							Key:   key,
+							Value: fmt.Sprintf("%v", val),
+						})
+					}
+				}
+			}
+
+			continue
+		}
+
+		if strings.ToLower(field.Key) == "url" {
+			urlFound = true
+		}
+
 		if strings.ToLower(field.Key) == "method" {
 			value.Label = strings.ToUpper(field.Value)
 			value.Action = value.Label
@@ -3309,6 +3385,13 @@ func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
 		}
 
 		newFields = append(newFields, field)
+	}
+
+	if !urlFound && len(foundUrl) > 0 {
+		newFields = append(newFields, shuffle.Valuereplace{
+			Key:   "url",
+			Value: foundUrl,
+		})
 	}
 
 	// Extra mapping handlers. This is in case the incomg data was in a weird format
@@ -4010,6 +4093,19 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 }
 
 func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace, org shuffle.Org, action shuffle.WorkflowAppAction, originalActionName string) shuffle.WorkflowAppAction {
+	if strings.ToLower(action.AppName) == "http" || action.Name == "custom_action" {
+		if debug {
+			log.Printf("[DEBUG] Skipping org specific parameters for HTTP or custom_action")
+		}
+
+		return action
+	}
+
+	if debug {
+		log.Printf("[DEBUG] Checking for org specific parameters for org %s (%s) and action %s", org.Name, org.Id, action.Name)
+	}
+
+
 	//log.Printf("\n\n[DEBUG] LOADING ORG SPECIFIC PARAMETERS\n\n")
 	for paramIndex, param := range action.Parameters {
 		if param.Configuration && param.Name != "url" {
