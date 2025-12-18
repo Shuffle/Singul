@@ -698,7 +698,23 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		value.AppName = ""
 	}
 
-	if strings.ToLower(value.AppName) == "http"  {
+	// Smart app correction: Check if we should analyze intent and correct app selection
+	if strings.ToLower(value.AppName) == "http" && (value.Label == "api" || value.Label == "custom_action" || value.Action == "custom_action") && len(value.Query) > 0 {
+		var tmpApps []shuffle.WorkflowApp
+		var tmpErr error
+		if !standalone {
+			tmpApps, tmpErr = shuffle.GetPrioritizedApps(ctx, user)
+			if tmpErr == nil && len(tmpApps) > 0 {
+				correctedAppName := AnalyzeIntentAndCorrectApp(ctx, value.Query, value.Fields, tmpApps)
+				if len(correctedAppName) > 0 && strings.ToLower(correctedAppName) != "http" {
+					value.AppName = correctedAppName
+					log.Printf("[INFO] Corrected app selection from 'http' to '%s' based on query intent", correctedAppName)
+				}
+			}
+		}
+	}
+
+	if strings.ToLower(value.AppName) == "http" {
 		value.AppName = ""
 	}
 
@@ -730,7 +746,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 
 	// WITHOUT finding the app first
-	if /*len(value.AppName) == 0 &&*/ len(value.Category) == 0  && len(value.AppId) == 0 && (value.Label == "api" || value.Label == "custom_action" || value.Action == "custom_action") {
+	if len(value.AppName) == 0 && len(value.Category) == 0 && len(value.AppId) == 0 && (value.Label == "api" || value.Label == "custom_action" || value.Action == "custom_action") {
 		log.Printf("[INFO] Got Singul 'custom action' request WITHOUT app. Mapping to HTTP 1.4.0.")
 
 		value = GetUpdatedHttpValue(value)
@@ -4469,6 +4485,118 @@ func AuthenticateAppCli(appname string) error {
 	}
 
 	return nil
+}
+
+// AnalyzeIntentAndCorrectApp uses LLM to find the right app based on query and fields
+// It caches results by URL
+// Returns corrected app name or empty string if no correction needed
+func AnalyzeIntentAndCorrectApp(ctx context.Context,
+	query string,
+	fields []shuffle.Valuereplace,
+	availableApps []shuffle.WorkflowApp) string {
+
+	urlValue := ""
+	fieldsSummary := ""
+
+	for _, field := range fields {
+		if field.Key == "url" {
+			urlValue = strings.TrimSpace(field.Value)
+		}
+
+		fieldLen := len(field.Value)
+		if fieldLen > 20 {
+			fieldLen = 20
+		}
+		fieldsSummary += field.Key + ":" + field.Value[:fieldLen] + "|"
+	}
+
+	domain := urlValue
+	if strings.HasPrefix(urlValue, "http://") {
+		domain = strings.TrimPrefix(urlValue, "http://")
+	} else if strings.HasPrefix(urlValue, "https://") {
+		domain = strings.TrimPrefix(urlValue, "https://")
+	}
+
+	// Remove path and query params - keep only domain
+	if idx := strings.Index(domain, "/"); idx != -1 {
+		domain = domain[:idx]
+	}
+	if idx := strings.Index(domain, "?"); idx != -1 {
+		domain = domain[:idx]
+	}
+
+	// Cache key uses domain only - any path on same domain = same app
+	cacheKeySource := fmt.Sprintf("app_intent_%s", domain)
+	cacheKey := fmt.Sprintf("singul_%x", md5.Sum([]byte(cacheKeySource)))
+
+	if cached, err := shuffle.GetCache(ctx, cacheKey); err == nil {
+		if debug {
+			log.Printf("[DEBUG] Cache HIT for intent correction. Domain: %s", domain)
+		}
+		return string([]byte(cached.([]uint8)))
+	}
+
+	appNames := []string{}
+	for _, app := range availableApps {
+		appNames = append(appNames, app.Name)
+	}
+
+	systemMessage := "You are an app detection assistant. Return ONLY the app name, nothing else."
+	userMessage := fmt.Sprintf(`Based on this request:
+- Query/Intent: "%s"
+- URL being called: "%s"
+- Input fields provided: %s
+
+Available apps: %s
+
+Which app should we use to fulfill this request?
+Return ONLY the app name from the list above. If you cannot find a matching app or http itself is correct, return "http".
+
+Example response: Gmail
+Example response: Slack
+Example response: http`,
+		query, urlValue, fieldsSummary, strings.Join(appNames, ", "))
+
+	responseBody, err := shuffle.RunAiQuery(systemMessage, userMessage)
+	if err != nil {
+		log.Printf("[WARNING] Failed calling LLM for app intent correction: %s", err)
+		return ""
+	}
+
+	contentOutput := strings.TrimSpace(responseBody)
+	if after, ok := strings.CutPrefix(contentOutput, "```"); ok {
+		contentOutput = after
+	}
+	if after, ok := strings.CutSuffix(contentOutput, "```"); ok {
+		contentOutput = after
+	}
+	if after, ok := strings.CutPrefix(contentOutput, "```json"); ok {
+		contentOutput = after
+	}
+	contentOutput = strings.TrimSpace(contentOutput)
+
+	correctedApp := strings.TrimSpace(strings.ToLower(contentOutput))
+
+	foundApp := ""
+	for _, app := range availableApps {
+		if strings.ToLower(app.Name) == correctedApp {
+			foundApp = app.Name
+			break
+		}
+	}
+
+	if len(foundApp) > 0 && foundApp != "http" {
+		// Cache for 3 days - same domain = same app
+		cacheDuration := 3 * 24 * time.Hour
+		shuffle.SetCache(ctx, cacheKey, []byte(foundApp), int32(cacheDuration.Seconds()))
+
+		if debug {
+			log.Printf("[DEBUG] Cache SET for intent correction. URL: %s -> App: %s", urlValue, foundApp)
+		}
+		return foundApp
+	}
+
+	return ""
 }
 
 // For handling the function without changing ALL the resp.X functions
