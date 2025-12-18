@@ -555,33 +555,6 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 	log.Printf("\n\n\n")
 }
 
-// Custom handler specifically for internal shuffle platform actions (e.g. get_ioc)
-func GetShuffleAction(label string, action shuffle.WorkflowAppAction) shuffle.WorkflowAppAction {
-	if strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(action.AppName), " ", "_"), "-", "_") != "shuffle_tools" && strings.ToLower(action.AppName) != "shuffle" {
-		return action
-	}
-
-	if label == "get_ioc" {
-		action.Name = "get_datastore_value" 
-		action.Parameters = []shuffle.WorkflowAppActionParameter{
-			shuffle.WorkflowAppActionParameter{
-				Name: "key",
-				Value: "{ioc}",
-				Description: "Replace with the IOC value",
-			},
-			shuffle.WorkflowAppActionParameter{
-				Name: "category",
-				Value: "ioc_{ioc_type}",
-				Description: "Replace with the IOC type (ip, domain, url, file)",
-			},
-		}
-	} else {
-		log.Printf("[ERROR] No internal shuffle action found for Singul label '%s'", label)
-	}
-
-	return action
-}
-
 func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.CategoryAction, resp http.ResponseWriter, request *http.Request) ([]byte, error) {
 	// Ensures avoidance of nil-pointers in resp.WriteHeader()
 	if resp == nil {
@@ -887,6 +860,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	selectedAction := shuffle.WorkflowAppAction{}
 
 	matchName := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value.AppName)), " ", "_")
+	if debug && len(matchName) > 0 { 
+		log.Printf("[DEBUG] Finding appname: %#v", matchName)
+	}
 	for _, app := range newapps {
 		if app.Name == "" {
 			continue
@@ -970,7 +946,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		log.Printf("[WARNING] Couldn't find app with ID or name '%s' active in org %s (%s)", value.AppName, user.ActiveOrg.Name, user.ActiveOrg.Id)
 		failed := true
 
-		if shuffle.GetProject().Environment == "cloud" && len(value.AppName) > 0 {
+		if len(value.AppName) > 0 && (shuffle.GetProject().Environment == "cloud" || standalone) {
 			foundApp, err := shuffle.HandleAlgoliaAppSearch(ctx, value.AppName)
 			if err != nil {
 				log.Printf("[ERROR] Failed getting app with ID or name '%s' in category action: %s", value.AppName, err)
@@ -985,6 +961,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						failed = false
 
 						//log.Printf("[DEBUG] Got app %s with %d actions", selectedApp.Name, len(selectedApp.Actions))
+						selectedAction, selectedCategory, availableLabels = GetActionFromLabel(ctx, selectedApp, value.Label, true, value.Fields, 0)
+					}
+				} else {
+					tmpApp, _, err := shuffle.GetAppSingul("", foundApp.ObjectID)
+					if err == nil {
+						selectedApp = *tmpApp
+						failed = false
+
 						selectedAction, selectedCategory, availableLabels = GetActionFromLabel(ctx, selectedApp, value.Label, true, value.Fields, 0)
 					}
 				}
@@ -1008,14 +992,16 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 			// Ensures we build it in the next section properly
 			// This no longer needs direct error handling in this location
-			selectedApp = shuffle.WorkflowApp{
-				Name: "HTTP",
-				AppVersion: "1.4.0",
-				Actions: []shuffle.WorkflowAppAction{
-					shuffle.WorkflowAppAction{
-						Name: "GET",
+			if !standalone { 
+				selectedApp = shuffle.WorkflowApp{
+					Name: "HTTP",
+					AppVersion: "1.4.0",
+					Actions: []shuffle.WorkflowAppAction{
+						shuffle.WorkflowAppAction{
+							Name: "GET",
+						},
 					},
-				},
+				}
 			}
 
 			/*
@@ -1290,8 +1276,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		log.Printf("[DEBUG] Translated action: %#v => %#v", originalActionName, selectedAction.Name)
 	}
 
-	selectedAction = GetShuffleAction(value.Label, selectedAction)
-
+	// Custom handler for certain translations
 	if len(selectedAction.Name) == 0 && value.Label != "discover_app" {
 		log.Printf("[WARNING] Couldn't find the label '%s' in app '%s'.", value.Label, selectedApp.Name)
 
@@ -3899,7 +3884,6 @@ func LocalizeAppscript(appname string) (string, error) {
 		}
 
 		requirementsPath := fmt.Sprintf("%s/requirements.txt", appscriptFolder)
-
 		if _, err := os.Stat(requirementsPath); os.IsNotExist(err) {
 			err = SetupRequirements(requirementsPath)
 			if err != nil {
@@ -4280,8 +4264,17 @@ func GetActionFromLabel(ctx context.Context, app shuffle.WorkflowApp, label stri
 
 func GetLocalAuth() ([]shuffle.AppAuthenticationStorage, error) {
 	allAuth := []shuffle.AppAuthenticationStorage{}
+
 	// Look for all files 
 	filePath := fmt.Sprintf("%s/auth", basepath)
+
+	// Check if directory exists
+	_, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
+		os.MkdirAll(filePath, os.ModePerm)
+		return allAuth, nil
+	}
+
 	files, err := os.ReadDir(filePath)
 	if err != nil {
 		if debug { 
