@@ -1147,6 +1147,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				}
 			}
 
+			if len(selectedAction.Name) == 0 {
+				selectedAction, selectedCategory, availableLabels = GetActionFromLabel(ctx, selectedApp, value.Label, true, value.Fields, 0)
+			}
+
 		} else {
 			pathIndex := -1 
 			urlIndex := -1
