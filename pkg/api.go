@@ -1845,17 +1845,33 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		if param.Name == "body" {
 			// FIXME: Look for key:values and inject values into them
 			// This SHOULD be just a dumb injection of existing value.Fields & value.OptionalFields for now with synonyms, but later on it should be a more advanced (use schemaless & cross org referencing)
-			if len(param.Example) > 0 && len(param.Value) == 0 {
+
+			// Check if this is a GET request - GET requests should NOT have a body
+			isGetRequest := false
+			for _, p := range secondAction.Parameters {
+				if p.Name == "method" && strings.ToUpper(p.Value) == "GET" {
+					isGetRequest = true
+					break
+				}
+			}
+
+			// Only set example data for non-GET requests
+			if !isGetRequest && len(param.Example) > 0 && len(param.Value) == 0 {
 				param.Value = param.Example
 			} else if len(param.Value) > 0 {
 			} else {
 				//param.Value = ""
-				log.Printf("[DEBUG] Found body param. Validating: %#v", param)
-				if !fieldChanged {
+				if debug {
+					log.Printf("[DEBUG] Found body param. Validating: %#v (GET request: %v)", param, isGetRequest)
+				}
+				if !fieldChanged && !isGetRequest {
 					log.Printf("\n\nBody not filled yet. Should fill it in (somehow) based on the existing input fields.\n\n")
 				}
 
-				param.Required = true
+				// Don't mark body as required for GET requests
+				if !isGetRequest {
+					param.Required = true
+				}
 			}
 		}
 
