@@ -11,7 +11,7 @@ require (
 	github.com/frikky/kin-openapi v0.42.0
 	github.com/frikky/schemaless v0.0.25
 	github.com/satori/go.uuid v1.2.0
-	github.com/shuffle/shuffle-shared v0.9.69
+	github.com/shuffle/shuffle-shared v0.9.76
 	github.com/spf13/cobra v1.9.1
 )
 
