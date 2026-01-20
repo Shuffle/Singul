@@ -179,6 +179,7 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 			if debug {
 				log.Printf("[DEBUG] FAILING INPUT BODY:\n%s", string(body))
 			}
+
 			resp.WriteHeader(400)
 			resp.Write([]byte(`{"success": false, "reason": "Your input fields are invalid. Please try again."}`))
 			return
@@ -582,6 +583,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		value.AppName = ""
 	}
 
+	if (value.Label == "test" || value.Label == "test_api") {
+		value.Label = "app_validation"
+	}
+
 	// Handles direct translations instead of app runs
 	//strings.ToLower(strings.ReplaceAll(value.Label, " ", "_")) == "translate_standard" && 
 	if strings.ToLower(strings.ReplaceAll(value.Category, " ", "_")) == "translate_standard" {
@@ -871,8 +876,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	matchName := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value.AppName)), " ", "_")
 	if debug && len(matchName) > 0 { 
-		log.Printf("[DEBUG] Finding appname: %#v", matchName)
+		log.Printf("[DEBUG] Finding appname %#v for label %#v", matchName, value.Label)
 	}
+
 	for _, app := range newapps {
 		if app.Name == "" {
 			continue
@@ -1028,8 +1034,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					log.Printf("[ERROR] Failed getting app with ID or name 'HTTP' in category action: %s. Name: %s (%s)", err, foundApp.Name, foundApp.ObjectID)
 				}
 			}
-
-			//func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
 
 			newFields := []shuffle.Valuereplace{}
 			for _, field := range value.Fields {
@@ -1816,7 +1820,16 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		secondAction.AppName = selectedApp.Name
 	}
 
+	log.Printf("[DEBUG] Org-specific parameter check for org %s (%s) on app %s action %s => %s", org.Name, org.Id, selectedApp.Name, selectedAction.Name, originalActionName)
 	selectedAction = GetOrgspecificParameters(ctx, value.Fields, *org, selectedAction, originalActionName)
+	if debug { 
+		for _, param := range selectedAction.Parameters {
+			if param.Name == "path" {
+				log.Printf("[DEBUG] Found path param: %#v => ex: %#v", param.Value, param.Example)
+				break
+			}
+		}
+	}
 
 	//log.Printf("[DEBUG] Required bodyfields: %#v", selectedAction.RequiredBodyFields)
 	handledRequiredFields := []string{}
@@ -1997,11 +2010,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	// as the mapping for the next runs
 
 	// HTTP goal: Make it NOT use the same variables again for HTTP/custom actions
-
-
-
+	// It's slow now as it doesn't seem to restore
 	if strings.ToLower(selectedAction.AppName) == "http" || selectedAction.Name == "custom_action" { 
-		log.Printf("[DEBUG] HTTP action. Skipping field content mapping")
+		if debug { 
+			log.Printf("[DEBUG] HTTP action. Skipping field content mapping. Action name: %#v. Original action name: %#v", selectedAction.Name, originalActionName)
+		}
 	} else if len(fieldFileContentMap) > 0 {
 		if debug { 
 			log.Printf("[DEBUG] Found file content map (Pre Reverse Schemaless): %#v", fieldFileContentMap)
@@ -2205,10 +2218,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			secondAction.Parameters[paramIndex].Value = "Content-Type: application/json"
 		}
 	}
-
-	// log.Printf("[INFO] Action: %#v", secondAction)
-	// os.Exit(1)
-	// Translates from Shuffle Action -> Pure HTTP if possible
 
 	// Runs individual apps, one at a time
 	if value.SkipWorkflow {
@@ -2460,7 +2469,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			successStruct := shuffle.ResultChecker{}
 			unmarshallErr := json.Unmarshal(apprunBody, &successStruct)
 			if unmarshallErr != nil {
-				log.Printf("[WARNING] Failed unmarshalling body for execute generated app run (4): %s. Raw: %s", err, string(apprunBody))
+				log.Printf("[WARNING] Failed unmarshalling body for execute generated app run (4): %s. URL: %s, Raw: %s", err, apprunUrl, string(apprunBody))
 			}
 
 			httpOutput, marshalledBody, httpParseErr = shuffle.FindHttpBody(apprunBody)
@@ -2514,9 +2523,17 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 			responseBodyString := "x-raw-response-url"
 			if _, ok := resp.Header()[responseBodyString]; ok {
-				resp.Header().Set(responseBodyString, string(marshalledHttpOutput))
+				if len(marshalledHttpOutput) < 1000 { 
+					resp.Header().Set(responseBodyString, string(marshalledHttpOutput))
+				} else {
+					resp.Header().Set(responseBodyString, "Output too large to display in header.")
+				}
 			} else {
-				resp.Header().Add(responseBodyString, string(marshalledHttpOutput))
+				if len(marshalledHttpOutput) < 1000 {
+					resp.Header().Add(responseBodyString, string(marshalledHttpOutput))
+				} else {
+					resp.Header().Add(responseBodyString, "Output too large to display in header (2).")
+				}
 			}
 
 			if marshalErr == nil {
@@ -2576,20 +2593,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						parsedParameterMap[param.Name] = param.Value
 					}
 
-					/*
-					if param.Name != "body" {
-						if debug { 
-							log.Printf("[DEBUG] Skipping parameter save for '%s' (FOR NOW). Focusing ONLY on body field.", param.Name)
-						}
-
-						continue
-					}
-					*/
-
 					if standalone { 
-						shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, param.Name, param.Value)
+						shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, originalActionName, param.Name, param.Value)
 					} else {
-						go shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, param.Name, param.Value)
+						go shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, originalActionName, param.Name, param.Value)
 					}
 				}
 
@@ -3106,7 +3113,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 // Translates and action IF custom_action is available
 // Uses OpenAPI spec to do so
-//func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.Action) shuffle.Action {
 func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowAppAction) shuffle.WorkflowAppAction {
 	if app.ID == "" || app.Name == "" {
 		return action
@@ -3310,6 +3316,29 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 			action.Parameters = append(action.Parameters, customActionParam)
 
 		}
+	}
+
+	bodyIndex := -1
+	removeBody := false 
+	for paramIndex, param := range action.Parameters {
+		if param.Name == "method" {
+			if param.Value == "" {
+				log.Printf("[ERROR] Failed to map method for original action name '%s' to custom_action parameters. Returning original action.", originalActionName)
+			}
+
+			if param.Value == "GET" { 
+				removeBody = true 
+			}
+		}
+
+		if param.Name == "body" {
+			bodyIndex = paramIndex
+		}
+	}
+
+	if bodyIndex != -1 && removeBody {
+		// Make a safe remove
+		action.Parameters = append(action.Parameters[:bodyIndex], action.Parameters[bodyIndex+1:]...)
 	}
 
 	if !originalActionNameFound {
@@ -4107,7 +4136,8 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 }
 
 func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace, org shuffle.Org, action shuffle.WorkflowAppAction, originalActionName string) shuffle.WorkflowAppAction {
-	if strings.ToLower(action.AppName) == "http" || action.Name == "custom_action" {
+	//if strings.ToLower(action.AppName) == "http" || action.Name == "custom_action" {
+	if strings.ToLower(action.AppName) == "http" || (action.Name == "custom_action" && originalActionName == "custom_action") {
 		if debug {
 			log.Printf("[DEBUG] Skipping org specific parameters for HTTP or custom_action")
 		}
@@ -4178,6 +4208,10 @@ func GetActionFromLabel(ctx context.Context, app shuffle.WorkflowApp, label stri
 	selectedCategory := shuffle.AppCategory{}
 	selectedAction := shuffle.WorkflowAppAction{}
 
+	if debug {
+		log.Printf("\n\n[DEBUG] Getting action from label '%s' in app %s (%s)\n\n", label, app.Name, app.ID)
+	}
+
 	if len(app.ID) == 0 || len(app.Actions) == 0 {
 		log.Printf("[WARNING] No actions in app %s (%s) for label '%s'", app.Name, app.ID, label)
 		return selectedAction, selectedCategory, availableLabels
@@ -4217,7 +4251,6 @@ func GetActionFromLabel(ctx context.Context, app shuffle.WorkflowApp, label stri
 			//log.Printf("%s: %#v\n", action.Name, action.CategoryLabel)
 			continue
 		}
-		//log.Printf("FOUND LABELS: %s -> %#v\n", action.Name, action.CategoryLabel)
 
 		for _, label := range action.CategoryLabel {
 			newLabel := strings.ReplaceAll(strings.ToLower(label), " ", "_")
