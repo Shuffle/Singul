@@ -12,6 +12,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+
+	"net/url"
 	"os"
 	"os/exec"
 	"sort"
@@ -2826,6 +2828,27 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//}
 
 			parsedTranslation.Retries = i + 1
+
+			// Use Refactored Helper for Reverse Action Lookup
+			log.Printf("[HEYOOO] Checking for reverse lookup. selectedAction.Name: '%s', value.Label: '%s'", selectedAction.Name, value.Label)
+
+			foundName, foundLabels := IdentifyCustomAction(
+				ctx,
+				selectedApp,
+				selectedAction.Name,
+				value.Label,
+				value.Fields,
+				secondAction.Parameters,
+			)
+
+			if len(foundName) > 0 {
+				log.Printf("[HEYOOO] Reverse lookup SUCCESS! Name: '%s', Labels: %v", foundName, foundLabels)
+				parsedTranslation.ActionName = foundName
+			}
+			if len(foundLabels) > 0 {
+				parsedTranslation.CategoryLabels = foundLabels
+			}
+
 			marshalledOutput, err := json.Marshal(parsedTranslation)
 			if err != nil {
 				log.Printf("[WARNING] Failed marshalling schemaless output for label %s: %s", value.Label, err)
@@ -2842,12 +2865,30 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		log.Printf("[ERROR] Done in autocorrect loop after %d iterations. This means Singul failure for action '%s' in org %s.", maxRerunAttempts, secondAction.Name, user.ActiveOrg.Id)
 
-
 		//parsedHttp, err := json.Marshal(httpOutput)
 		parsedTranslation.Retries = maxRerunAttempts
 		parsedTranslation.Success = false
 		parsedTranslation.RawResponse = httpOutput
 		parsedTranslation.Output = httpOutput.Body
+
+		// Use Helper to Identify Real Action (Reverse Lookup) on FAILURE Path
+		// This is critical for tests to know WHAT failed.
+		failedName, failedLabels := IdentifyCustomAction(
+			ctx,
+			selectedApp,
+			selectedAction.Name,
+			value.Label,
+			value.Fields,
+			secondAction.Parameters,
+		)
+
+		if len(failedName) > 0 {
+			parsedTranslation.ActionName = failedName
+		}
+		if len(failedLabels) > 0 {
+			parsedTranslation.CategoryLabels = failedLabels
+		}
+
 		parsedOutput, err := json.Marshal(parsedTranslation)
 		if err != nil {
 			resp.WriteHeader(500)
@@ -3049,6 +3090,18 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	}
 
 	returnBody := shuffle.HandleRetValidation(ctx, workflowExecution, len(parentWorkflow.Actions))
+
+	// Reverse lookup for custom_action to find real category label
+	// Must receive the label BEFORE clearing the actions lol
+	foundName, foundLabels := IdentifyCustomAction(
+		ctx,
+		selectedApp,
+		selectedAction.Name,
+		value.Label,
+		value.Fields,
+		secondAction.Parameters,
+	)
+
 	selectedApp.LargeImage = ""
 	selectedApp.Actions = []shuffle.WorkflowAppAction{}
 	structuredFeedback := shuffle.StructuredCategoryAction{
@@ -3060,6 +3113,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		Reason:         "Analyze Result for details",
 		ApiDebuggerUrl: fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID),
 		Result:         returnBody.Result,
+	}
+
+	if len(foundName) > 0 {
+		structuredFeedback.ActionName = foundName
+	}
+
+	if len(foundLabels) > 0 {
+		structuredFeedback.CategoryLabels = foundLabels
 	}
 
 	jsonParsed, err := json.Marshal(structuredFeedback)
@@ -4796,4 +4857,213 @@ func HandleSingulStartnode(execution shuffle.WorkflowExecution, action shuffle.A
 	}
 
 	return action, urls
+}
+
+// IdentifyCustomAction identifies the real action name and category labels for a generic custom_action
+// by analyzing the input URL and method against the App's OpenAPI spec.
+func IdentifyCustomAction(ctx context.Context, app shuffle.WorkflowApp, actionName string, actionLabel string, inputFields []shuffle.Valuereplace, actionParams []shuffle.WorkflowAppActionParameter) (string, []string) {
+
+	// Fast fail if not a custom action or api call
+	isCustom := false
+	if actionName == "custom_action" || actionLabel == "custom_action" || actionName == "api" || actionLabel == "api" {
+		isCustom = true
+	}
+
+	if !isCustom {
+		return "", []string{}
+	}
+
+	foundMethod := ""
+	foundUrl := ""
+
+	// Prioritize finding URL/Method from the Actual Input Fields (runtime input)
+	for _, field := range inputFields {
+		if strings.EqualFold(field.Key, "method") {
+			foundMethod = field.Value
+		}
+		if strings.EqualFold(field.Key, "url") {
+			foundUrl = field.Value
+		}
+	}
+
+	// Fallback to action parameters (configuration defaults)
+	if len(foundUrl) == 0 || len(foundMethod) == 0 {
+		for _, param := range actionParams {
+			if param.Name == "method" && len(foundMethod) == 0 {
+				foundMethod = param.Value
+			}
+			if param.Name == "url" && len(foundUrl) == 0 {
+				foundUrl = param.Value
+			}
+		}
+	}
+
+	if len(foundMethod) == 0 || len(foundUrl) == 0 {
+		return "", []string{}
+	}
+
+	// Perform the Reverse Lookup
+	fLabels, fName, err := FindMatchingActionFromURL(ctx, app, foundMethod, foundUrl)
+	if err != nil {
+		log.Printf("[DEBUG] Reverse lookup failed for %s %s: %v", foundMethod, foundUrl, err)
+		return "", []string{}
+	}
+
+	// Normalize labels to snake_case
+	normalizedLabels := []string{}
+	for _, l := range fLabels {
+		norm := strings.ToLower(strings.ReplaceAll(l, " ", "_"))
+		normalizedLabels = append(normalizedLabels, norm)
+	}
+
+	return fName, normalizedLabels
+}
+
+// Finds the original action based on the URL and Method used in a custom_action
+func FindMatchingActionFromURL(ctx context.Context, app shuffle.WorkflowApp, method string, urlStr string) ([]string, string, error) {
+	if app.ID == "" || app.Name == "" {
+		return []string{}, "", fmt.Errorf("App mismatch")
+	}
+
+	// Only relevant for generated apps with specs
+	if !app.Generated {
+		return []string{}, "", fmt.Errorf("Not a generated app")
+	}
+
+	_, openapiSpec, err := shuffle.GetAppSingul("", app.Name)
+	if err != nil || openapiSpec == nil || openapiSpec.Info == nil {
+		return []string{}, "", fmt.Errorf("Failed to load spec")
+	}
+
+	// Parse the input URL to get just the path
+	parsedUrl, err := url.Parse(urlStr)
+	if err != nil {
+		return []string{}, "", fmt.Errorf("Failed to parse URL: %s", err)
+	}
+
+	// We want to match the path.
+	// Spec paths: /v1/users/{userId}/messages
+	// Input path: /gmail/v1/users/me/messages (Note: Base URL might be included or not)
+	// The Input path from the user might contain the Base Path of the server already.
+	// e.g. Server: https://gmail.googleapis.com
+	// Path in spec: /gmail/v1/users/...
+	// User Input: https://gmail.googleapis.com/gmail/v1/users/... -> path: /gmail/v1/users/...
+
+	// So we match parsedUrl.Path against keys in openapiSpec.Paths
+
+	inputPath := parsedUrl.Path
+	method = strings.ToUpper(method)
+
+	for specPath, methodData := range openapiSpec.Paths {
+
+		// 1. Check Method match first (Optimization)
+		var summary string
+		if method == "GET" && methodData.Get != nil {
+			summary = methodData.Get.Summary
+		} else if method == "POST" && methodData.Post != nil {
+			summary = methodData.Post.Summary
+		} else if method == "PUT" && methodData.Put != nil {
+			summary = methodData.Put.Summary
+		} else if method == "PATCH" && methodData.Patch != nil {
+			summary = methodData.Patch.Summary
+		} else if method == "DELETE" && methodData.Delete != nil {
+			summary = methodData.Delete.Summary
+		} else {
+			continue
+		}
+
+		// 2. Check Path Match
+		// We need to handle path parameters like {userId} matching anything except slash
+		// We use segment-based matching.
+		// Robustness fix: The Spec Path might be relative (e.g. /users) while Input Path is absolute (e.g. /api/v1/users).
+		// So we check if the Spec Path segments match the SUFFIX of the Input Path segments.
+
+		// Split by '/' to get segments
+		specParts := strings.Split(specPath, "/")
+		inputParts := strings.Split(inputPath, "/")
+
+		// Filter empty strings resulting from leading/trailing slashes
+		var cleanSpecParts []string
+		for _, p := range specParts {
+			if p != "" {
+				cleanSpecParts = append(cleanSpecParts, p)
+			}
+		}
+		var cleanInputParts []string
+		for _, p := range inputParts {
+			if p != "" {
+				cleanInputParts = append(cleanInputParts, p)
+			}
+		}
+
+		// If spec has more parts than input, it can't match (Input is shorter than the definition)
+		if len(cleanSpecParts) > len(cleanInputParts) {
+			continue
+		}
+
+		// Check matching suffix
+		// We compare the last N parts of input with the N parts of spec
+		match := true
+		offset := len(cleanInputParts) - len(cleanSpecParts)
+
+		for i := 0; i < len(cleanSpecParts); i++ {
+			specPart := cleanSpecParts[i]
+			inputPart := cleanInputParts[offset+i] // Match end of input
+
+			if strings.HasPrefix(specPart, "{") && strings.HasSuffix(specPart, "}") {
+				// Wildcard match (variable)
+				continue
+			}
+
+			// Case-insensitive match for static segments? Probably safer to be case-sensitive for paths,
+			// but for safety in messy inputs, maybe insensitive? verifiable standard is case-sensitive.
+			// keeping case-sensitive for now.
+			if specPart != inputPart {
+				match = false
+				break
+			}
+		}
+
+		if match {
+			// FOUND IT!
+			// Now find the Action in app.Actions that corresponds to this Summary
+			// Logic from GetTranslatedHttpAction:
+			// App Action Name format: method_summary_words
+
+			// Actually, we can just search app.Actions for the label/name?
+			// "Label" in AppAction is usually the Summary without underscores (or with?)
+
+			// Let's perform a loose search through App.Actions
+			// because strict name reconstruction is risky if logic changes.
+
+			for _, action := range app.Actions {
+				// Check if Action Name contains the summary?
+				// GetTranslatedHttpAction checks: fmt.Sprintf("get_%s", ...)
+
+				// Let's assume the Label might match the Summary directly
+				if strings.EqualFold(action.Name, summary) ||
+					strings.EqualFold(strings.ReplaceAll(action.Name, "_", " "), summary) {
+					return action.CategoryLabel, action.Name, nil
+				}
+
+				// Also check constructed name like in GetTranslatedHttpAction
+				constructedName := fmt.Sprintf("%s_%s", strings.ToLower(method), strings.ReplaceAll(strings.ToLower(summary), " ", "_"))
+				if strings.HasPrefix(constructedName, fmt.Sprintf("%s_%s_", strings.ToLower(method), strings.ToLower(method))) {
+					constructedName = strings.Replace(constructedName, fmt.Sprintf("%s_", strings.ToLower(method)), "", 1)
+				}
+
+				if action.Name == constructedName {
+					return action.CategoryLabel, action.Name, nil
+				}
+			}
+
+			// If strictly not found in structure, return just the Summary as label?
+			// User requested CategoryLabels specifically.
+			// If we can't find the struct action, we can't get the static CategoryLabel list.
+			// But we can fallback to returning the summary as a label.
+			return []string{strings.ReplaceAll(strings.ToLower(summary), " ", "_")}, summary, nil
+		}
+	}
+
+	return []string{}, "", fmt.Errorf("No match found")
 }
