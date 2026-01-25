@@ -2829,9 +2829,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 			parsedTranslation.Retries = i + 1
 
-			// Use Refactored Helper for Reverse Action Lookup
-			log.Printf("[HEYOOO] Checking for reverse lookup. selectedAction.Name: '%s', value.Label: '%s'", selectedAction.Name, value.Label)
-
 			foundName, foundLabels := IdentifyCustomAction(
 				ctx,
 				selectedApp,
@@ -2842,7 +2839,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			)
 
 			if len(foundName) > 0 {
-				log.Printf("[HEYOOO] Reverse lookup SUCCESS! Name: '%s', Labels: %v", foundName, foundLabels)
+				log.Printf("[DEBUG] Reverse lookup SUCCESS! Name: '%s', Labels: %v", foundName, foundLabels)
 				parsedTranslation.ActionName = foundName
 			}
 			if len(foundLabels) > 0 {
@@ -2872,7 +2869,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		parsedTranslation.Output = httpOutput.Body
 
 		// Use Helper to Identify Real Action (Reverse Lookup) on FAILURE Path
-		// This is critical for tests to know WHAT failed.
 		failedName, failedLabels := IdentifyCustomAction(
 			ctx,
 			selectedApp,
@@ -3091,7 +3087,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	returnBody := shuffle.HandleRetValidation(ctx, workflowExecution, len(parentWorkflow.Actions))
 
-	// Reverse lookup for custom_action to find real category label
 	// Must receive the label BEFORE clearing the actions lol
 	foundName, foundLabels := IdentifyCustomAction(
 		ctx,
