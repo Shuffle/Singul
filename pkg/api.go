@@ -4859,8 +4859,6 @@ func HandleSingulStartnode(execution shuffle.WorkflowExecution, action shuffle.A
 	return action, urls
 }
 
-// IdentifyCustomAction identifies the real action name and category labels for a generic custom_action
-// by analyzing the input URL and method against the App's OpenAPI spec.
 func IdentifyCustomAction(ctx context.Context, app shuffle.WorkflowApp, actionName string, actionLabel string, inputFields []shuffle.Valuereplace, actionParams []shuffle.WorkflowAppActionParameter) (string, []string) {
 
 	// Fast fail if not a custom action or api call
@@ -4909,7 +4907,6 @@ func IdentifyCustomAction(ctx context.Context, app shuffle.WorkflowApp, actionNa
 		return "", []string{}
 	}
 
-	// Normalize labels to snake_case
 	normalizedLabels := []string{}
 	for _, l := range fLabels {
 		norm := strings.ToLower(strings.ReplaceAll(l, " ", "_"))
@@ -4935,22 +4932,12 @@ func FindMatchingActionFromURL(ctx context.Context, app shuffle.WorkflowApp, met
 		return []string{}, "", fmt.Errorf("Failed to load spec")
 	}
 
-	// Parse the input URL to get just the path
 	parsedUrl, err := url.Parse(urlStr)
 	if err != nil {
 		return []string{}, "", fmt.Errorf("Failed to parse URL: %s", err)
 	}
 
-	// We want to match the path.
-	// Spec paths: /v1/users/{userId}/messages
-	// Input path: /gmail/v1/users/me/messages (Note: Base URL might be included or not)
-	// The Input path from the user might contain the Base Path of the server already.
-	// e.g. Server: https://gmail.googleapis.com
-	// Path in spec: /gmail/v1/users/...
-	// User Input: https://gmail.googleapis.com/gmail/v1/users/... -> path: /gmail/v1/users/...
-
-	// So we match parsedUrl.Path against keys in openapiSpec.Paths
-
+	// Match parsedUrl.Path against keys in openapiSpec.Paths
 	inputPath := parsedUrl.Path
 	method = strings.ToUpper(method)
 
@@ -4972,13 +4959,7 @@ func FindMatchingActionFromURL(ctx context.Context, app shuffle.WorkflowApp, met
 			continue
 		}
 
-		// 2. Check Path Match
-		// We need to handle path parameters like {userId} matching anything except slash
-		// We use segment-based matching.
-		// Robustness fix: The Spec Path might be relative (e.g. /users) while Input Path is absolute (e.g. /api/v1/users).
-		// So we check if the Spec Path segments match the SUFFIX of the Input Path segments.
-
-		// Split by '/' to get segments
+		// 2. Check Path Match via Suffix (handles base path differences)
 		specParts := strings.Split(specPath, "/")
 		inputParts := strings.Split(inputPath, "/")
 
@@ -4996,28 +4977,22 @@ func FindMatchingActionFromURL(ctx context.Context, app shuffle.WorkflowApp, met
 			}
 		}
 
-		// If spec has more parts than input, it can't match (Input is shorter than the definition)
 		if len(cleanSpecParts) > len(cleanInputParts) {
 			continue
 		}
 
-		// Check matching suffix
-		// We compare the last N parts of input with the N parts of spec
 		match := true
 		offset := len(cleanInputParts) - len(cleanSpecParts)
 
 		for i := 0; i < len(cleanSpecParts); i++ {
 			specPart := cleanSpecParts[i]
-			inputPart := cleanInputParts[offset+i] // Match end of input
+			inputPart := cleanInputParts[offset+i]
 
 			if strings.HasPrefix(specPart, "{") && strings.HasSuffix(specPart, "}") {
-				// Wildcard match (variable)
+				// Wildcard match
 				continue
 			}
 
-			// Case-insensitive match for static segments? Probably safer to be case-sensitive for paths,
-			// but for safety in messy inputs, maybe insensitive? verifiable standard is case-sensitive.
-			// keeping case-sensitive for now.
 			if specPart != inputPart {
 				match = false
 				break
@@ -5025,28 +5000,16 @@ func FindMatchingActionFromURL(ctx context.Context, app shuffle.WorkflowApp, met
 		}
 
 		if match {
-			// FOUND IT!
-			// Now find the Action in app.Actions that corresponds to this Summary
-			// Logic from GetTranslatedHttpAction:
-			// App Action Name format: method_summary_words
-
-			// Actually, we can just search app.Actions for the label/name?
-			// "Label" in AppAction is usually the Summary without underscores (or with?)
-
-			// Let's perform a loose search through App.Actions
-			// because strict name reconstruction is risky if logic changes.
-
+			// Found matching path/method. Now look up the Action definition.
 			for _, action := range app.Actions {
-				// Check if Action Name contains the summary?
-				// GetTranslatedHttpAction checks: fmt.Sprintf("get_%s", ...)
 
-				// Let's assume the Label might match the Summary directly
+				// Check loose match on Name/Summary
 				if strings.EqualFold(action.Name, summary) ||
 					strings.EqualFold(strings.ReplaceAll(action.Name, "_", " "), summary) {
 					return action.CategoryLabel, action.Name, nil
 				}
 
-				// Also check constructed name like in GetTranslatedHttpAction
+				// Check constructed generated name format (method_summary)
 				constructedName := fmt.Sprintf("%s_%s", strings.ToLower(method), strings.ReplaceAll(strings.ToLower(summary), " ", "_"))
 				if strings.HasPrefix(constructedName, fmt.Sprintf("%s_%s_", strings.ToLower(method), strings.ToLower(method))) {
 					constructedName = strings.Replace(constructedName, fmt.Sprintf("%s_", strings.ToLower(method)), "", 1)
@@ -5057,10 +5020,7 @@ func FindMatchingActionFromURL(ctx context.Context, app shuffle.WorkflowApp, met
 				}
 			}
 
-			// If strictly not found in structure, return just the Summary as label?
-			// User requested CategoryLabels specifically.
-			// If we can't find the struct action, we can't get the static CategoryLabel list.
-			// But we can fallback to returning the summary as a label.
+			// Fallback: return summary as label if no explicit Action struct match found
 			return []string{strings.ReplaceAll(strings.ToLower(summary), " ", "_")}, summary, nil
 		}
 	}
