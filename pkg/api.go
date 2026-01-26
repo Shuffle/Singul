@@ -495,7 +495,9 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 
 			// Generate an ID if we didn't find one
 			if len(foundIdentifier) <= 4 {
-				log.Printf("[ERROR] Failed finding VALID ID key in item for label %s: %#v. ID Key: %s, Value: %s", value.Label, item, foundIdentifierKey, foundIdentifier)
+				if debug { 
+					log.Printf("[DEBUG] Failed finding VALID ID key in item for label %s: %#v. ID Key: %s, Value: %s", value.Label, item, foundIdentifierKey, foundIdentifier)
+				}
 
 				marshalledItem, err := json.Marshal(generatedItem)
 				if err != nil {
