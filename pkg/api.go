@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"compress/gzip"
 	"io"
 	"log"
 	"net/http"
@@ -372,7 +373,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 				curOrg = fmt.Sprintf("execution:%s", newExecutionId)
 			}
 
-			log.Printf("\n\n\nSINGUL UPLOAD (2)\n\n\n")
+			log.Printf("\n\n\nSINGUL UPLOAD - %#v (2)\n\n\n", parsedTranslation)
 			autoUploadSingulOutput(
 				ctx, 
 				curOrg, 
@@ -422,6 +423,18 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 			if actualLabel == "ticket" || actualLabel == "user" || actualLabel == "asset" || actualLabel == "contact" || actualLabel == "alert" || actualLabel == "case" || actualLabel == "event" || actualLabel == "domain" || actualLabel == "ip" || actualLabel == "url" || actualLabel == "file" {
 				actualLabel = fmt.Sprintf("%ss", actualLabel)
 			}
+
+			if actualLabel == "tickets" {
+				actualLabel = "shuffle-security incidents"
+			}
+
+			if actualLabel == "assets" {
+				actualLabel = "shuffle-security assets"
+			}
+
+			if actualLabel == "users" {
+				actualLabel = "shuffle-security users"
+			}
 		}
 
 		allEntries := []shuffle.CacheKeyData{}
@@ -436,7 +449,7 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 
 			generatedItem := item.(map[string]interface{})
 
-			idKeys := []string{"id", "uid", "uuid", "identifier", "key"}
+			idKeys := []string{"id", "uid", "uuid", "identifier", "key", "finding_uid"}
 			foundIdentifier := ""
 			foundIdentifierKey := ""
 			for _, idKey := range idKeys {
@@ -462,7 +475,7 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 			}
 
 			// hardcoded override for product name. Just a test.
-			toolKeys := []string{"product", "tool", "service", "application", "app"}
+			toolKeys := []string{"product", "source", "tool", "service", "application", "app"}
 			if len(secondAction.AppName) > 0 { 
 				for _, toolKey := range toolKeys {
 					for key, mapValue := range generatedItem {
@@ -1820,18 +1833,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		secondAction.AppName = selectedApp.Name
 	}
 
-	log.Printf("[DEBUG] Org-specific parameter check for org %s (%s) on app %s action %s => %s", org.Name, org.Id, selectedApp.Name, selectedAction.Name, originalActionName)
 	selectedAction = GetOrgspecificParameters(ctx, value.Fields, *org, selectedAction, originalActionName)
-	if debug { 
-		for _, param := range selectedAction.Parameters {
-			if param.Name == "path" {
-				log.Printf("[DEBUG] Found path param: %#v => ex: %#v", param.Value, param.Example)
-				break
-			}
-		}
-	}
-
-	//log.Printf("[DEBUG] Required bodyfields: %#v", selectedAction.RequiredBodyFields)
 	handledRequiredFields := []string{}
 	missingFields = []string{}
 
@@ -2096,7 +2098,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	authorization := ""
 	optionalExecutionId := ""
 	client := shuffle.GetExternalClient(baseUrl)
-	if len(missingFields) > 0 && selectedAction.Name != "custom_action" {
+	//if len(missingFields) > 0 && selectedAction.Name != "custom_action" {
+	if len(missingFields) > 0 {
 		if debug {
 			log.Printf("[DEBUG] Missing fields for action: %#v. This means the current translation may be missing or wrong. Setting fieldFileFound back to false and re-setting it at the end", missingFields)
 		}
@@ -2104,13 +2107,18 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		fieldFileFound = false  
 
 		formattedQueryFields := []string{}
+		formattedQueryFieldsValueReplace := []shuffle.Valuereplace{}
 		for _, missing := range missingFields {
 
 			for _, field := range value.Fields {
-
 				if field.Key != missing {
 					continue
 				}
+
+				formattedQueryFieldsValueReplace = append(formattedQueryFieldsValueReplace, shuffle.Valuereplace{
+					Key:   field.Key,
+					Value: field.Value,
+				})
 
 				formattedQueryFields = append(formattedQueryFields, fmt.Sprintf("%s=%s", field.Key, field.Value))
 				break
@@ -2123,7 +2131,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			joinedString = strings.Trim(joinedString, "&")
 		}
 
-		formattedQuery := fmt.Sprintf("Use the fields '%s' with app %s to '%s'.", joinedString, strings.ReplaceAll(selectedApp.Name, "_", " "), strings.ReplaceAll(value.Label, "_", " "))
+		formattedQuery := fmt.Sprintf("Use the inputted fields '%s' with app %s to '%s'.", joinedString, strings.ReplaceAll(selectedApp.Name, "_", " "), strings.ReplaceAll(value.Label, "_", " "))
 
 		newQueryInput := shuffle.QueryInput{
 			Query:        formattedQuery,
@@ -2139,59 +2147,84 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			Parameters: selectedAction.Parameters,
 		}
 
-		responseBody, err := GetActionAIResponseWrapper(ctx, newQueryInput)
-		if err != nil {
-			log.Printf("[WARNING] Failed getting AI response: %s", err)
-			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed getting AI response. Contact support."}`))
-			resp.WriteHeader(500)
-			resp.Write(respBody)
-			return respBody, err
-		}
+		if selectedAction.Name == "custom_action" { 
+			//originalFields := []shuffle.Valuereplace{}
+			//for _, param := range selectedAction.Parameters {
+			//	originalFields = append(originalFields, shuffle.Valuereplace{
+			//		Key:   param.Name,
+			//		Value: param.Value,
+			//	})
+			//}
 
-		//log.Printf("[DEBUG] GOT RESPONSE BODY (params): %#v", string(responseBody))
 
-		//log.Printf("\n\n[DEBUG] TRANSLATED REQUEST RETURNED: %s\n\n", string(responseBody))
-		if strings.Contains(string(responseBody), `"success": false`) {
-			log.Printf("[WARNING] Failed running app %s (%s). Contact support.", selectedAction.Name, selectedAction.AppID)
-			resp.WriteHeader(500)
-			resp.Write(responseBody)
-			return responseBody, err
-		}
+			fullUrl := ""
+			outputBody := "The fields are not filled in correctly. Fill in all relevant fields and make sure it is a valid HTTP API request."
+			inputdata := ""
 
-		// Unmarshal responseBody back to
-		newSecondAction := shuffle.Action{}
-		err = json.Unmarshal(responseBody, &newSecondAction)
-		if err != nil {
-			log.Printf("[WARNING] Failed unmarshalling body for execute generated workflow: %s %+v", err, string(responseBody))
-			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed parsing app response. Contact support if this persists."}`))
-			resp.WriteHeader(500)
-			resp.Write(respBody)
-			return respBody, err
-		}
+			//formattedQueryFields = append(formattedQueryFields, fmt.Sprintf("%s=%s", field.Key, field.Value))
 
-		secondAction.LargeImage = ""
-		missingFields = []string{}
-		for _, param := range newSecondAction.Parameters {
-			if param.Configuration {
-				continue
+			secondAction.Name = originalActionName
+			newOutputAction, _, err := shuffle.RunSelfCorrectingRequest(formattedQueryFieldsValueReplace, secondAction, 400, formattedQuery, fullUrl, outputBody, secondAction.AppName, inputdata, 0)
+			//func RunSelfCorrectingRequest(originalFields []Valuereplace, action Action, status int, additionalInfo, fullUrl, outputBody, appname, inputdata string, attempt ...int) (Action, string, error) {
+
+			if err != nil {
+				log.Printf("[ERROR] Failed running self-correcting request for custom action: %s", err)
+			} else {
+				newOutputAction.Name = "custom_action"
+				secondAction = newOutputAction
+			}
+		} else {
+			responseBody, err := GetActionAIResponseWrapper(ctx, newQueryInput)
+			if err != nil {
+				log.Printf("[WARNING] Failed getting AI response: %s", err)
+				respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed getting AI response. Contact support."}`))
+				resp.WriteHeader(500)
+				resp.Write(respBody)
+				return respBody, err
 			}
 
-			for paramIndex, originalParam := range secondAction.Parameters {
-				if originalParam.Name != param.Name {
+			if strings.Contains(string(responseBody), `"success": false`) {
+				log.Printf("[WARNING] Failed running app %s (%s). Contact support.", selectedAction.Name, selectedAction.AppID)
+				resp.WriteHeader(500)
+				resp.Write(responseBody)
+				return responseBody, err
+			}
+
+			// Unmarshal responseBody back to
+			newSecondAction := shuffle.Action{}
+			err = json.Unmarshal(responseBody, &newSecondAction)
+			if err != nil {
+				log.Printf("[WARNING] Failed unmarshalling body for execute generated workflow: %s %+v", err, string(responseBody))
+				respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed parsing app response. Contact support if this persists."}`))
+				resp.WriteHeader(500)
+				resp.Write(respBody)
+				return respBody, err
+			}
+
+			secondAction.LargeImage = ""
+			missingFields = []string{}
+			for _, param := range newSecondAction.Parameters {
+				if param.Configuration {
 					continue
 				}
 
-				if len(param.Value) > 0 && param.Value != originalParam.Value {
-					secondAction.Parameters[paramIndex].Value = param.Value
-					secondAction.Parameters[paramIndex].Tags = param.Tags
-				}
+				for paramIndex, originalParam := range secondAction.Parameters {
+					if originalParam.Name != param.Name {
+						continue
+					}
 
-				//log.Printf("[INFO] Required - Key: %s, Value: %#v", param.Name, param.Value)
-				if originalParam.Required && len(secondAction.Parameters[paramIndex].Value) == 0 {
-					missingFields = append(missingFields, param.Name)
-				}
+					if len(param.Value) > 0 && param.Value != originalParam.Value {
+						secondAction.Parameters[paramIndex].Value = param.Value
+						secondAction.Parameters[paramIndex].Tags = param.Tags
+					}
 
-				break
+					//log.Printf("[INFO] Required - Key: %s, Value: %#v", param.Name, param.Value)
+					if originalParam.Required && len(secondAction.Parameters[paramIndex].Value) == 0 {
+						missingFields = append(missingFields, param.Name)
+					}
+
+					break
+				}
 			}
 		}
 	}
@@ -2311,7 +2344,12 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 			// FIXME: How to deal with random fields here?
 			if debug && len(missingBodyParams) > 0 { 
-				log.Printf("\n\n\nMISSING PARAMS (%s => %s): %#v\n\n\n", originalActionName, secondAction.Name, missingBodyParams)
+				parsedParams := ""
+				for _, param := range secondAction.Parameters {
+					parsedParams = fmt.Sprintf("%s%s: '%s'\n", parsedParams, param.Name, param.Value)
+				}
+
+				log.Printf("\n\n\nMISSING PARAMS (%s => %s): %#v. Available params:\n%s\n\n\n", originalActionName, secondAction.Name, missingBodyParams, parsedParams)
 			}
 
 			if len(missingBodyParams) > 0 {
@@ -2394,6 +2432,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				//	log.Printf("\n\n[DEBUG] Attempt preparedAction (url: %s): %s\n\n", apprunUrl, string(preparedAction))
 				//}
 
+
 				req, err := http.NewRequest(
 					"POST",
 					apprunUrl,
@@ -2446,6 +2485,19 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					resp.WriteHeader(500)
 					resp.Write(respBody)
 					return respBody, err
+				}
+
+				// Only try to gunzip if the header claims gzip
+				if strings.EqualFold(newresp.Header.Get("Content-Encoding"), "gzip") {
+					zr, err := gzip.NewReader(bytes.NewReader(apprunBody))
+					if err == nil {
+						defer zr.Close()
+
+						decompressed, err := io.ReadAll(zr)
+						if err == nil {
+							apprunBody = decompressed
+						}
+					}
 				}
 			}
 
@@ -3302,6 +3354,7 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 		}
 	}
 
+	queriesIndex := -1
 	bodyIndex := -1
 	removeBody := false 
 	for paramIndex, param := range action.Parameters {
@@ -3318,11 +3371,25 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 		if param.Name == "body" {
 			bodyIndex = paramIndex
 		}
+
+		if param.Name == "queriesIndex" {
+			queriesIndex = paramIndex
+		}
 	}
 
 	if bodyIndex != -1 && removeBody {
 		// Make a safe remove
 		action.Parameters = append(action.Parameters[:bodyIndex], action.Parameters[bodyIndex+1:]...)
+	}
+
+	if queriesIndex == -1 {
+		customActionParam := shuffle.WorkflowAppActionParameter{
+			Name:  "queries",
+			Value: "",
+		}
+
+		log.Printf("[DEBUG] Appending '%s' with value %#v (%s => custom_action)", customActionParam.Name, customActionParam.Value, originalActionName)
+		action.Parameters = append(action.Parameters, customActionParam)
 	}
 
 	if !originalActionNameFound {
