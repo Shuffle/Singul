@@ -1999,9 +1999,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	// HTTP goal: Make it NOT use the same variables again for HTTP/custom actions
 	// It's slow now as it doesn't seem to restore
-	if strings.ToLower(selectedAction.AppName) == "http" || selectedAction.Name == "custom_action" { 
+	//if strings.ToLower(selectedAction.AppName) == "http" || selectedAction.Name == "custom_action" { 
+	if strings.ToLower(selectedAction.AppName) == "http" {
 		if debug { 
-			log.Printf("[DEBUG] HTTP action. Skipping field content mapping. Action name: %#v. Original action name: %#v", selectedAction.Name, originalActionName)
+			log.Printf("[DEBUG] HTTP action. Skipping field content mapping. Action name: %#v. Original action name: %#v. FILE CONTENT MAP: %#v", selectedAction.Name, originalActionName, fieldFileContentMap)
 		}
 	} else if len(fieldFileContentMap) > 0 {
 		if debug { 
@@ -2038,7 +2039,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 				foundIndex = paramIndex
 				if param.Name == "queries" {
-					if len(param.Value) == 0 {
+					if len(param.Value) < 2 {
 						selectedAction.Parameters[paramIndex].Value = fmt.Sprintf("%s=%s", key, mapValue.(string))
 					} else {
 						selectedAction.Parameters[paramIndex].Value = fmt.Sprintf("%s&%s=%s", param.Value, key, mapValue.(string))
@@ -2172,6 +2173,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			if err != nil {
 				log.Printf("[ERROR] Failed running self-correcting request for custom action: %s", err)
 			} else {
+				if debug {
+					log.Printf("[DEBUG] POST RunSelfCorrectingRequest")
+				}
+
 				newOutputAction.Name = "custom_action"
 				secondAction = newOutputAction
 			}
@@ -2632,9 +2637,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					}
 
 					if standalone { 
-						shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, originalActionName, param.Name, param.Value)
+						shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, originalActionName, param.Name, param.Value)
 					} else {
-						go shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, originalActionName, param.Name, param.Value)
+						go shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, originalActionName, param.Name, param.Value)
 					}
 				}
 
@@ -4198,12 +4203,24 @@ func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace
 		return action
 	}
 
+	// FIXME: Subpathing here could be useful to not always re-parse
+	// Gets an md5 based on input keys, as to make sure we get the correct file
+	md5Identifier := ""
+	if action.Name == "custom_action" {
+		fieldsParsed := []string{}
+		for _, field := range fields {
+			fieldsParsed = append(fieldsParsed, field.Key)
+		}
+
+		// Sort it 
+		sort.Strings(fieldsParsed)
+		md5Identifier = fmt.Sprintf("%x", md5.Sum([]byte(strings.Join(fieldsParsed, "|"))))
+	}
+
 	if debug {
 		log.Printf("[DEBUG] Checking for org specific parameters for org %s (%s) and action %s", org.Name, org.Id, action.Name)
 	}
 
-
-	//log.Printf("\n\n[DEBUG] LOADING ORG SPECIFIC PARAMETERS\n\n")
 	for paramIndex, param := range action.Parameters {
 		if param.Configuration && param.Name != "url" {
 			continue
@@ -4213,13 +4230,19 @@ func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace
 			continue
 		}
 
-		//fileId := fmt.Sprintf("file_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(action.Name), " ", "_", -1), strings.ToLower(param.Name))
 		fileId := fmt.Sprintf("file_parameter_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(originalActionName), " ", "_", -1), strings.ToLower(param.Name))
 
 		// Ensures we load from the correct folder
 		if standalone {
 			fileId = fmt.Sprintf("file_parameter_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(originalActionName), " ", "_", -1), strings.ToLower(param.Name))
 			fileId = fmt.Sprintf("app_defaults/%s", fileId)
+		}
+
+		if action.Name == "custom_action" && len(md5Identifier) > 0 {
+			fileId = fmt.Sprintf("file_parameter_%s-%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), md5Identifier, strings.Replace(strings.ToLower(originalActionName), " ", "_", -1), strings.ToLower(param.Name))
+			if standalone {
+				fileId = fmt.Sprintf("app_defaults/%s", fileId)
+			}
 		}
 
 		file, err := shuffle.GetFileSingul(ctx, fileId)
