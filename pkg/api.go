@@ -13,6 +13,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+
+	"net/url"
 	"os"
 	"os/exec"
 	"sort"
@@ -625,6 +627,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 
 	respBody := []byte{}
+	var foundName string
+	var foundLabels []string
 	if len(value.Label) == 0 {
 		respBody = []byte(`{"success": false, "reason": "No label set in category action"}`)
 		resp.WriteHeader(400)
@@ -2339,7 +2343,18 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			resp.Header().Set("x-appid", selectedApp.ID)
 		}
 
-		for i := 0; i < maxRerunAttempts ; i++ {
+		if selectedAction.Name == "custom_action" || value.Label == "custom_action" || selectedAction.Name == "api" || value.Label == "api" {
+			foundName, foundLabels = IdentifyCustomAction(
+				ctx,
+				selectedApp,
+				selectedAction.Name,
+				value.Label,
+				value.Fields,
+				secondAction.Parameters,
+			)
+		}
+
+		for i := 0; i < maxRerunAttempts; i++ {
 
 			// This is an autocorrective measure to ensure ALL fields
 			// have been filled in accordance to the input from the user.
@@ -2885,6 +2900,15 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//}
 
 			parsedTranslation.Retries = i + 1
+
+			if len(foundName) > 0 {
+				log.Printf("[DEBUG] Reverse lookup SUCCESS! Name: '%s', Labels: %v", foundName, foundLabels)
+				parsedTranslation.ActionName = foundName
+			}
+			if len(foundLabels) > 0 {
+				parsedTranslation.CategoryLabels = foundLabels
+			}
+
 			marshalledOutput, err := json.Marshal(parsedTranslation)
 			if err != nil {
 				log.Printf("[WARNING] Failed marshalling schemaless output for label %s: %s", value.Label, err)
@@ -2901,12 +2925,19 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		log.Printf("[ERROR] Done in autocorrect loop after %d iterations. This means Singul failure for action '%s' in org %s.", maxRerunAttempts, secondAction.Name, user.ActiveOrg.Id)
 
-
 		//parsedHttp, err := json.Marshal(httpOutput)
 		parsedTranslation.Retries = maxRerunAttempts
 		parsedTranslation.Success = false
 		parsedTranslation.RawResponse = httpOutput
 		parsedTranslation.Output = httpOutput.Body
+
+		if len(foundName) > 0 {
+			parsedTranslation.ActionName = foundName
+		}
+		if len(foundLabels) > 0 {
+			parsedTranslation.CategoryLabels = foundLabels
+		}
+
 		parsedOutput, err := json.Marshal(parsedTranslation)
 		if err != nil {
 			resp.WriteHeader(500)
@@ -3108,6 +3139,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	}
 
 	returnBody := shuffle.HandleRetValidation(ctx, workflowExecution, len(parentWorkflow.Actions))
+
 	selectedApp.LargeImage = ""
 	selectedApp.Actions = []shuffle.WorkflowAppAction{}
 	structuredFeedback := shuffle.StructuredCategoryAction{
@@ -3119,6 +3151,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		Reason:         "Analyze Result for details",
 		ApiDebuggerUrl: fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID),
 		Result:         returnBody.Result,
+	}
+
+	if len(foundName) > 0 {
+		structuredFeedback.ActionName = foundName
+	}
+
+	if len(foundLabels) > 0 {
+		structuredFeedback.CategoryLabels = foundLabels
 	}
 
 	jsonParsed, err := json.Marshal(structuredFeedback)
@@ -4888,4 +4928,203 @@ func HandleSingulStartnode(execution shuffle.WorkflowExecution, action shuffle.A
 	}
 
 	return action, urls
+}
+
+func IdentifyCustomAction(ctx context.Context, app shuffle.WorkflowApp, actionName string, actionLabel string, inputFields []shuffle.Valuereplace, actionParams []shuffle.WorkflowAppActionParameter) (string, []string) {
+
+	isCustom := false
+	if actionName == "custom_action" || actionLabel == "custom_action" || actionName == "api" || actionLabel == "api" {
+		isCustom = true
+	}
+
+	if !isCustom {
+		return "", []string{}
+	}
+
+	foundMethod := ""
+	foundUrl := ""
+
+	// Prioritize finding URL/Method from the Actual Input Fields (runtime input)
+	for _, field := range inputFields {
+		if strings.EqualFold(field.Key, "method") {
+			foundMethod = field.Value
+		}
+		if strings.EqualFold(field.Key, "url") || strings.EqualFold(field.Key, "path") {
+			foundUrl = field.Value
+		}
+	}
+
+	if len(foundUrl) == 0 || len(foundMethod) == 0 {
+		for _, param := range actionParams {
+			if param.Name == "method" && len(foundMethod) == 0 {
+				foundMethod = param.Value
+			}
+			if (param.Name == "url" || param.Name == "path") && len(foundUrl) == 0 {
+				foundUrl = param.Value
+			}
+		}
+	}
+
+	if len(foundMethod) == 0 || len(foundUrl) == 0 {
+		return "", []string{}
+	}
+
+	type CachedReverseAction struct {
+		Name   string   `json:"name"`
+		Labels []string `json:"labels"`
+	}
+
+	cacheKey := fmt.Sprintf("singul_reverse_%s_%s_%s", app.Name, foundMethod, foundUrl)
+	// Try to get from cache
+	cache, err := shuffle.GetCache(ctx, cacheKey)
+	if err == nil {
+		if cacheData, ok := cache.([]byte); ok {
+			var cachedResult CachedReverseAction
+			if json.Unmarshal(cacheData, &cachedResult) == nil && len(cachedResult.Name) > 0 {
+				return cachedResult.Name, cachedResult.Labels
+			}
+		}
+	}
+
+	// Perform the Reverse Lookup
+	fLabels, fName, err := FindMatchingActionFromURL(ctx, app, foundMethod, foundUrl)
+	if err != nil {
+		log.Printf("[DEBUG] Reverse lookup failed for %s %s: %v", foundMethod, foundUrl, err)
+		return "", []string{}
+	}
+
+	normalizedLabels := []string{}
+	for _, l := range fLabels {
+		norm := strings.ToLower(strings.ReplaceAll(l, " ", "_"))
+		normalizedLabels = append(normalizedLabels, norm)
+	}
+
+	toCache := CachedReverseAction{
+		Name:   fName,
+		Labels: normalizedLabels,
+	}
+
+	cacheData, err := json.Marshal(toCache)
+	if err != nil {
+		log.Printf("[WARNING] Failed to marshal cache data for reverse lookup: %v", err)
+	} else {
+		err = shuffle.SetCache(ctx, cacheKey, cacheData, 259200)
+		if err != nil {
+			log.Printf("[WARNING] Failed to set cache for reverse lookup: %v", err)
+		}
+	}
+
+	return fName, normalizedLabels
+}
+
+// Finds the original action based on the URL and Method used in a custom_action
+func FindMatchingActionFromURL(ctx context.Context, app shuffle.WorkflowApp, method string, urlStr string) ([]string, string, error) {
+	if app.ID == "" || app.Name == "" {
+		return []string{}, "", fmt.Errorf("App mismatch")
+	}
+
+	// Only relevant for generated apps with specs
+	if !app.Generated {
+		return []string{}, "", fmt.Errorf("Not a generated app")
+	}
+
+	_, openapiSpec, err := shuffle.GetAppSingul("", app.Name)
+	if err != nil || openapiSpec == nil || openapiSpec.Info == nil {
+		return []string{}, "", fmt.Errorf("Failed to load spec")
+	}
+
+	parsedUrl, err := url.Parse(urlStr)
+	if err != nil {
+		return []string{}, "", fmt.Errorf("Failed to parse URL: %s", err)
+	}
+
+	// Match parsedUrl.Path against keys in openapiSpec.Paths
+	inputPath := parsedUrl.Path
+	method = strings.ToUpper(method)
+
+	for specPath, methodData := range openapiSpec.Paths {
+
+		// 1. Check Method match first (Optimization)
+		var summary string
+		if method == "GET" && methodData.Get != nil {
+			summary = methodData.Get.Summary
+		} else if method == "POST" && methodData.Post != nil {
+			summary = methodData.Post.Summary
+		} else if method == "PUT" && methodData.Put != nil {
+			summary = methodData.Put.Summary
+		} else if method == "PATCH" && methodData.Patch != nil {
+			summary = methodData.Patch.Summary
+		} else if method == "DELETE" && methodData.Delete != nil {
+			summary = methodData.Delete.Summary
+		} else {
+			continue
+		}
+
+		// 2. Check Path Match via Suffix (handles base path differences)
+		specParts := strings.Split(specPath, "/")
+		inputParts := strings.Split(inputPath, "/")
+
+		// Filter empty strings resulting from leading/trailing slashes
+		var cleanSpecParts []string
+		for _, p := range specParts {
+			if p != "" {
+				cleanSpecParts = append(cleanSpecParts, p)
+			}
+		}
+		var cleanInputParts []string
+		for _, p := range inputParts {
+			if p != "" {
+				cleanInputParts = append(cleanInputParts, p)
+			}
+		}
+
+		if len(cleanSpecParts) > len(cleanInputParts) {
+			continue
+		}
+
+		match := true
+		offset := len(cleanInputParts) - len(cleanSpecParts)
+
+		for i := 0; i < len(cleanSpecParts); i++ {
+			specPart := cleanSpecParts[i]
+			inputPart := cleanInputParts[offset+i]
+
+			if strings.HasPrefix(specPart, "{") && strings.HasSuffix(specPart, "}") {
+				// Wildcard match
+				continue
+			}
+
+			if specPart != inputPart {
+				match = false
+				break
+			}
+		}
+
+		if match {
+			// Found matching path/method. Now look up the Action definition.
+			for _, action := range app.Actions {
+
+				// Check loose match on Name/Summary
+				if strings.EqualFold(action.Name, summary) ||
+					strings.EqualFold(strings.ReplaceAll(action.Name, "_", " "), summary) {
+					return action.CategoryLabel, action.Name, nil
+				}
+
+				// Check constructed generated name format (method_summary)
+				constructedName := fmt.Sprintf("%s_%s", strings.ToLower(method), strings.ReplaceAll(strings.ToLower(summary), " ", "_"))
+				if strings.HasPrefix(constructedName, fmt.Sprintf("%s_%s_", strings.ToLower(method), strings.ToLower(method))) {
+					constructedName = strings.Replace(constructedName, fmt.Sprintf("%s_", strings.ToLower(method)), "", 1)
+				}
+
+				if action.Name == constructedName {
+					return action.CategoryLabel, action.Name, nil
+				}
+			}
+
+			// Fallback: return summary as label if no explicit Action struct match found
+			return []string{strings.ReplaceAll(strings.ToLower(summary), " ", "_")}, summary, nil
+		}
+	}
+
+	return []string{}, "", fmt.Errorf("No match found")
 }
