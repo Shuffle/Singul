@@ -627,6 +627,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 
 	respBody := []byte{}
+	var foundName string
+	var foundLabels []string
 	if len(value.Label) == 0 {
 		respBody = []byte(`{"success": false, "reason": "No label set in category action"}`)
 		resp.WriteHeader(400)
@@ -2336,7 +2338,18 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			resp.Header().Set("x-appid", selectedApp.ID)
 		}
 
-		for i := 0; i < maxRerunAttempts ; i++ {
+		if selectedAction.Name == "custom_action" || value.Label == "custom_action" || selectedAction.Name == "api" || value.Label == "api" {
+			foundName, foundLabels = IdentifyCustomAction(
+				ctx,
+				selectedApp,
+				selectedAction.Name,
+				value.Label,
+				value.Fields,
+				secondAction.Parameters,
+			)
+		}
+
+		for i := 0; i < maxRerunAttempts; i++ {
 
 			// This is an autocorrective measure to ensure ALL fields
 			// have been filled in accordance to the input from the user.
@@ -2883,15 +2896,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 			parsedTranslation.Retries = i + 1
 
-			foundName, foundLabels := IdentifyCustomAction(
-				ctx,
-				selectedApp,
-				selectedAction.Name,
-				value.Label,
-				value.Fields,
-				secondAction.Parameters,
-			)
-
 			if len(foundName) > 0 {
 				log.Printf("[DEBUG] Reverse lookup SUCCESS! Name: '%s', Labels: %v", foundName, foundLabels)
 				parsedTranslation.ActionName = foundName
@@ -2922,21 +2926,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		parsedTranslation.RawResponse = httpOutput
 		parsedTranslation.Output = httpOutput.Body
 
-		// Use Helper to Identify Real Action (Reverse Lookup) on FAILURE Path
-		failedName, failedLabels := IdentifyCustomAction(
-			ctx,
-			selectedApp,
-			selectedAction.Name,
-			value.Label,
-			value.Fields,
-			secondAction.Parameters,
-		)
-
-		if len(failedName) > 0 {
-			parsedTranslation.ActionName = failedName
+		if len(foundName) > 0 {
+			parsedTranslation.ActionName = foundName
 		}
-		if len(failedLabels) > 0 {
-			parsedTranslation.CategoryLabels = failedLabels
+		if len(foundLabels) > 0 {
+			parsedTranslation.CategoryLabels = foundLabels
 		}
 
 		parsedOutput, err := json.Marshal(parsedTranslation)
@@ -3142,14 +3136,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	returnBody := shuffle.HandleRetValidation(ctx, workflowExecution, len(parentWorkflow.Actions))
 
 	// Must receive the label BEFORE clearing the actions lol
-	foundName, foundLabels := IdentifyCustomAction(
-		ctx,
-		selectedApp,
-		selectedAction.Name,
-		value.Label,
-		value.Fields,
-		secondAction.Parameters,
-	)
+	// Reusing pre-computed values from start of execution loop scope
+	// Note: If we reached here, it means we are in the "Workflow Generation" path (Line 2943+)
+	// or similar fallback. The variables foundName/foundLabels are available in this scope.
 
 	selectedApp.LargeImage = ""
 	selectedApp.Actions = []shuffle.WorkflowAppAction{}
@@ -4925,7 +4914,6 @@ func HandleSingulStartnode(execution shuffle.WorkflowExecution, action shuffle.A
 
 func IdentifyCustomAction(ctx context.Context, app shuffle.WorkflowApp, actionName string, actionLabel string, inputFields []shuffle.Valuereplace, actionParams []shuffle.WorkflowAppActionParameter) (string, []string) {
 
-	// Fast fail if not a custom action or api call
 	isCustom := false
 	if actionName == "custom_action" || actionLabel == "custom_action" || actionName == "api" || actionLabel == "api" {
 		isCustom = true
@@ -4943,18 +4931,17 @@ func IdentifyCustomAction(ctx context.Context, app shuffle.WorkflowApp, actionNa
 		if strings.EqualFold(field.Key, "method") {
 			foundMethod = field.Value
 		}
-		if strings.EqualFold(field.Key, "url") {
+		if strings.EqualFold(field.Key, "url") || strings.EqualFold(field.Key, "path") {
 			foundUrl = field.Value
 		}
 	}
 
-	// Fallback to action parameters (configuration defaults)
 	if len(foundUrl) == 0 || len(foundMethod) == 0 {
 		for _, param := range actionParams {
 			if param.Name == "method" && len(foundMethod) == 0 {
 				foundMethod = param.Value
 			}
-			if param.Name == "url" && len(foundUrl) == 0 {
+			if (param.Name == "url" || param.Name == "path") && len(foundUrl) == 0 {
 				foundUrl = param.Value
 			}
 		}
@@ -4962,6 +4949,23 @@ func IdentifyCustomAction(ctx context.Context, app shuffle.WorkflowApp, actionNa
 
 	if len(foundMethod) == 0 || len(foundUrl) == 0 {
 		return "", []string{}
+	}
+
+	type CachedReverseAction struct {
+		Name   string   `json:"name"`
+		Labels []string `json:"labels"`
+	}
+
+	cacheKey := fmt.Sprintf("singul_reverse_%s_%s_%s", app.Name, foundMethod, foundUrl)
+	// Try to get from cache
+	cache, err := shuffle.GetCache(ctx, cacheKey)
+	if err == nil {
+		if cacheData, ok := cache.([]byte); ok {
+			var cachedResult CachedReverseAction
+			if json.Unmarshal(cacheData, &cachedResult) == nil && len(cachedResult.Name) > 0 {
+				return cachedResult.Name, cachedResult.Labels
+			}
+		}
 	}
 
 	// Perform the Reverse Lookup
@@ -4975,6 +4979,21 @@ func IdentifyCustomAction(ctx context.Context, app shuffle.WorkflowApp, actionNa
 	for _, l := range fLabels {
 		norm := strings.ToLower(strings.ReplaceAll(l, " ", "_"))
 		normalizedLabels = append(normalizedLabels, norm)
+	}
+
+	toCache := CachedReverseAction{
+		Name:   fName,
+		Labels: normalizedLabels,
+	}
+
+	cacheData, err := json.Marshal(toCache)
+	if err != nil {
+		log.Printf("[WARNING] Failed to marshal cache data for reverse lookup: %v", err)
+	} else {
+		err = shuffle.SetCache(ctx, cacheKey, cacheData, 259200)
+		if err != nil {
+			log.Printf("[WARNING] Failed to set cache for reverse lookup: %v", err)
+		}
 	}
 
 	return fName, normalizedLabels
