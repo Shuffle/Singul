@@ -3135,11 +3135,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	returnBody := shuffle.HandleRetValidation(ctx, workflowExecution, len(parentWorkflow.Actions))
 
-	// Must receive the label BEFORE clearing the actions lol
-	// Reusing pre-computed values from start of execution loop scope
-	// Note: If we reached here, it means we are in the "Workflow Generation" path (Line 2943+)
-	// or similar fallback. The variables foundName/foundLabels are available in this scope.
-
 	selectedApp.LargeImage = ""
 	selectedApp.Actions = []shuffle.WorkflowAppAction{}
 	structuredFeedback := shuffle.StructuredCategoryAction{
