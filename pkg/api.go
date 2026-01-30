@@ -2169,7 +2169,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//formattedQueryFields = append(formattedQueryFields, fmt.Sprintf("%s=%s", field.Key, field.Value))
 
 			secondAction.Name = originalActionName
-			newOutputAction, _, err := shuffle.RunSelfCorrectingRequest(formattedQueryFieldsValueReplace, secondAction, 400, formattedQuery, fullUrl, outputBody, secondAction.AppName, inputdata, 0)
+			newOutputAction, _, err := shuffle.RunSelfCorrectingRequest(formattedQueryFieldsValueReplace, secondAction, 400, formattedQuery, fullUrl, outputBody, secondAction.AppName, value.Query, inputdata, 0)
 			//func RunSelfCorrectingRequest(originalFields []Valuereplace, action Action, status int, additionalInfo, fullUrl, outputBody, appname, inputdata string, attempt ...int) (Action, string, error) {
 
 			if err != nil {
