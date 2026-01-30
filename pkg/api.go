@@ -425,18 +425,18 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 			if actualLabel == "ticket" || actualLabel == "user" || actualLabel == "asset" || actualLabel == "contact" || actualLabel == "alert" || actualLabel == "case" || actualLabel == "event" || actualLabel == "domain" || actualLabel == "ip" || actualLabel == "url" || actualLabel == "file" {
 				actualLabel = fmt.Sprintf("%ss", actualLabel)
 			}
+		}
 
-			if actualLabel == "tickets" {
-				actualLabel = "shuffle-security incidents"
-			}
+		if actualLabel == "tickets" || actualLabel == "alerts" || actualLabel == "cases" {
+			actualLabel = "shuffle-security incidents"
+		}
 
-			if actualLabel == "assets" {
-				actualLabel = "shuffle-security assets"
-			}
+		if actualLabel == "assets" {
+			actualLabel = "shuffle-security assets"
+		}
 
-			if actualLabel == "users" {
-				actualLabel = "shuffle-security users"
-			}
+		if actualLabel == "users" {
+			actualLabel = "shuffle-security users"
 		}
 
 		allEntries := []shuffle.CacheKeyData{}
@@ -451,7 +451,7 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 
 			generatedItem := item.(map[string]interface{})
 
-			idKeys := []string{"id", "uid", "uuid", "identifier", "key", "finding_uid"}
+			idKeys := []string{"id", "uid", "uuid", "identifier", "key"}
 			foundIdentifier := ""
 			foundIdentifierKey := ""
 			for _, idKey := range idKeys {
@@ -1851,8 +1851,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			if strings.ReplaceAll(strings.ToLower(field.Key), " ", "_") == strings.ReplaceAll(strings.ToLower(param.Name), " ", "_") {
 				param.Value = field.Value
 				fieldChanged = true
-
-				//handledFields = append(handledFields, field.Key)
 			}
 		}
 
@@ -2177,10 +2175,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			if err != nil {
 				log.Printf("[ERROR] Failed running self-correcting request for custom action: %s", err)
 			} else {
-				if debug {
-					log.Printf("[DEBUG] POST RunSelfCorrectingRequest")
-				}
-
 				newOutputAction.Name = "custom_action"
 				secondAction = newOutputAction
 			}
@@ -2241,7 +2235,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	}
 
 	for paramIndex, param := range secondAction.Parameters {
-		secondAction.Parameters[paramIndex].Example = ""
 		if param.Name == "headers" && len(param.Value) == 0 {
 			secondAction.Parameters[paramIndex].Value = "Content-Type: application/json"
 		}
@@ -2258,11 +2251,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//return respBody, errors.New("Not all required fields were found")
 		}
 
-
-		// Used for testing if params are as they should be
-		//for _, param := range secondAction.Parameters {
-		//	log.Printf("PARAM: %s: %s", param.Name, param.Value)
-		//}
 
 		preparedAction, err := json.Marshal(secondAction)
 		if err != nil {
@@ -2652,9 +2640,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					}
 
 					if standalone { 
-						shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, originalActionName, param.Name, param.Value)
+						shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, originalActionName, param.Name, param.Value, param.Example)
 					} else {
-						go shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, originalActionName, param.Name, param.Value)
+						go shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, originalActionName, param.Name, param.Value, param.Example)
 					}
 				}
 
@@ -3250,6 +3238,7 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 			continue
 		}
 
+		param.Example = param.Value
 		newParams = append(newParams, param)
 	}
 
@@ -3282,8 +3271,6 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 		*/
 
 		if !found {
-
-			// FIXME: For now just handles POST due to testing
 			for path, methodData := range openapiSpec.Paths {
 				if methodData.Get != nil {
 					parsedSummary := fmt.Sprintf("get_%s", strings.ReplaceAll(strings.ToLower(methodData.Get.Summary), " ", "_"))
@@ -3396,6 +3383,7 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 			}
 
 			//customActionParam.Value = path
+			customActionParam.Example = customActionParam.Value
 			action.Parameters = append(action.Parameters, customActionParam)
 
 		}
@@ -3419,7 +3407,7 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 			bodyIndex = paramIndex
 		}
 
-		if param.Name == "queriesIndex" {
+		if param.Name == "queries" {
 			queriesIndex = paramIndex
 		}
 	}
@@ -3433,9 +3421,9 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 		customActionParam := shuffle.WorkflowAppActionParameter{
 			Name:  "queries",
 			Value: "",
+			Example: "",
 		}
 
-		log.Printf("[DEBUG] Appending '%s' with value %#v (%s => custom_action)", customActionParam.Name, customActionParam.Value, originalActionName)
 		action.Parameters = append(action.Parameters, customActionParam)
 	}
 
@@ -4234,8 +4222,7 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 }
 
 func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace, org shuffle.Org, action shuffle.WorkflowAppAction, originalActionName string) shuffle.WorkflowAppAction {
-	//if strings.ToLower(action.AppName) == "http" || action.Name == "custom_action" {
-	if strings.ToLower(action.AppName) == "http" || (action.Name == "custom_action" && originalActionName == "custom_action") {
+	if strings.ToLower(action.AppName) == "http" || (action.Name == "custom_action" && originalActionName == "custom_action" && len(fields) == 0) {
 		if debug {
 			log.Printf("[DEBUG] Skipping org specific parameters for HTTP or custom_action")
 		}
@@ -4269,6 +4256,9 @@ func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace
 		if len(param.Options) > 0 {
 			continue
 		}
+
+		// Setting before to ensure overrides can work
+		action.Parameters[paramIndex].Example = action.Parameters[paramIndex].Value
 
 		fileId := fmt.Sprintf("file_parameter_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(originalActionName), " ", "_", -1), strings.ToLower(param.Name))
 
@@ -4307,13 +4297,14 @@ func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace
 			continue
 		}
 
+
+		// FIXME: What happens here?
 		stringContent := string(content)
 		for _, field := range fields {
 			stringContent = strings.ReplaceAll(stringContent, fmt.Sprintf("{%s}", field.Key), field.Value)
 		}
 
 		action.Parameters[paramIndex].Value = stringContent
-		action.Parameters[paramIndex].Example = stringContent
 	}
 
 	return action
