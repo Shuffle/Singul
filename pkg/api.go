@@ -9,9 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"compress/gzip"
 	"io"
 	"log"
 	"net/http"
+
+	"net/url"
 	"os"
 	"os/exec"
 	"sort"
@@ -372,7 +375,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 				curOrg = fmt.Sprintf("execution:%s", newExecutionId)
 			}
 
-			log.Printf("\n\n\nSINGUL UPLOAD (2)\n\n\n")
+			log.Printf("\n\n\nSINGUL UPLOAD - %#v (2)\n\n\n", parsedTranslation)
 			autoUploadSingulOutput(
 				ctx, 
 				curOrg, 
@@ -424,6 +427,18 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 			}
 		}
 
+		if actualLabel == "tickets" || actualLabel == "alerts" || actualLabel == "cases" {
+			actualLabel = "shuffle-security incidents"
+		}
+
+		if actualLabel == "assets" {
+			actualLabel = "shuffle-security assets"
+		}
+
+		if actualLabel == "users" {
+			actualLabel = "shuffle-security users"
+		}
+
 		allEntries := []shuffle.CacheKeyData{}
 
 		// Goroutine BUT wait on the end
@@ -462,7 +477,7 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 			}
 
 			// hardcoded override for product name. Just a test.
-			toolKeys := []string{"product", "tool", "service", "application", "app"}
+			toolKeys := []string{"product", "source", "tool", "service", "application", "app"}
 			if len(secondAction.AppName) > 0 { 
 				for _, toolKey := range toolKeys {
 					for key, mapValue := range generatedItem {
@@ -482,7 +497,9 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 
 			// Generate an ID if we didn't find one
 			if len(foundIdentifier) <= 4 {
-				log.Printf("[ERROR] Failed finding VALID ID key in item for label %s: %#v. ID Key: %s, Value: %s", value.Label, item, foundIdentifierKey, foundIdentifier)
+				if debug { 
+					log.Printf("[DEBUG] Failed finding VALID ID key in item for label %s: %#v. ID Key: %s, Value: %s", value.Label, item, foundIdentifierKey, foundIdentifier)
+				}
 
 				marshalledItem, err := json.Marshal(generatedItem)
 				if err != nil {
@@ -610,6 +627,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 
 	respBody := []byte{}
+	var foundName string
+	var foundLabels []string
 	if len(value.Label) == 0 {
 		respBody = []byte(`{"success": false, "reason": "No label set in category action"}`)
 		resp.WriteHeader(400)
@@ -1820,18 +1839,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		secondAction.AppName = selectedApp.Name
 	}
 
-	log.Printf("[DEBUG] Org-specific parameter check for org %s (%s) on app %s action %s => %s", org.Name, org.Id, selectedApp.Name, selectedAction.Name, originalActionName)
 	selectedAction = GetOrgspecificParameters(ctx, value.Fields, *org, selectedAction, originalActionName)
-	if debug { 
-		for _, param := range selectedAction.Parameters {
-			if param.Name == "path" {
-				log.Printf("[DEBUG] Found path param: %#v => ex: %#v", param.Value, param.Example)
-				break
-			}
-		}
-	}
-
-	//log.Printf("[DEBUG] Required bodyfields: %#v", selectedAction.RequiredBodyFields)
 	handledRequiredFields := []string{}
 	missingFields = []string{}
 
@@ -1843,8 +1851,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			if strings.ReplaceAll(strings.ToLower(field.Key), " ", "_") == strings.ReplaceAll(strings.ToLower(param.Name), " ", "_") {
 				param.Value = field.Value
 				fieldChanged = true
-
-				//handledFields = append(handledFields, field.Key)
 			}
 		}
 
@@ -2011,9 +2017,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	// HTTP goal: Make it NOT use the same variables again for HTTP/custom actions
 	// It's slow now as it doesn't seem to restore
-	if strings.ToLower(selectedAction.AppName) == "http" || selectedAction.Name == "custom_action" { 
+	//if strings.ToLower(selectedAction.AppName) == "http" || selectedAction.Name == "custom_action" { 
+	if strings.ToLower(selectedAction.AppName) == "http" {
 		if debug { 
-			log.Printf("[DEBUG] HTTP action. Skipping field content mapping. Action name: %#v. Original action name: %#v", selectedAction.Name, originalActionName)
+			log.Printf("[DEBUG] HTTP action. Skipping field content mapping. Action name: %#v. Original action name: %#v. FILE CONTENT MAP: %#v", selectedAction.Name, originalActionName, fieldFileContentMap)
 		}
 	} else if len(fieldFileContentMap) > 0 {
 		if debug { 
@@ -2050,7 +2057,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 				foundIndex = paramIndex
 				if param.Name == "queries" {
-					if len(param.Value) == 0 {
+					if len(param.Value) < 2 {
 						selectedAction.Parameters[paramIndex].Value = fmt.Sprintf("%s=%s", key, mapValue.(string))
 					} else {
 						selectedAction.Parameters[paramIndex].Value = fmt.Sprintf("%s&%s=%s", param.Value, key, mapValue.(string))
@@ -2112,7 +2119,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	authorization := ""
 	optionalExecutionId := ""
 	client := shuffle.GetExternalClient(baseUrl)
-	if len(missingFields) > 0 && selectedAction.Name != "custom_action" {
+	//if len(missingFields) > 0 && selectedAction.Name != "custom_action" {
+	if len(missingFields) > 0 {
 		if debug {
 			log.Printf("[DEBUG] Missing fields for action: %#v. This means the current translation may be missing or wrong. Setting fieldFileFound back to false and re-setting it at the end", missingFields)
 		}
@@ -2120,13 +2128,18 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		fieldFileFound = false  
 
 		formattedQueryFields := []string{}
+		formattedQueryFieldsValueReplace := []shuffle.Valuereplace{}
 		for _, missing := range missingFields {
 
 			for _, field := range value.Fields {
-
 				if field.Key != missing {
 					continue
 				}
+
+				formattedQueryFieldsValueReplace = append(formattedQueryFieldsValueReplace, shuffle.Valuereplace{
+					Key:   field.Key,
+					Value: field.Value,
+				})
 
 				formattedQueryFields = append(formattedQueryFields, fmt.Sprintf("%s=%s", field.Key, field.Value))
 				break
@@ -2139,7 +2152,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			joinedString = strings.Trim(joinedString, "&")
 		}
 
-		formattedQuery := fmt.Sprintf("Use the fields '%s' with app %s to '%s'.", joinedString, strings.ReplaceAll(selectedApp.Name, "_", " "), strings.ReplaceAll(value.Label, "_", " "))
+		formattedQuery := fmt.Sprintf("Use the inputted fields '%s' with app %s to '%s'.", joinedString, strings.ReplaceAll(selectedApp.Name, "_", " "), strings.ReplaceAll(value.Label, "_", " "))
 
 		newQueryInput := shuffle.QueryInput{
 			Query:        formattedQuery,
@@ -2155,65 +2168,89 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			Parameters: selectedAction.Parameters,
 		}
 
-		responseBody, err := GetActionAIResponseWrapper(ctx, newQueryInput)
-		if err != nil {
-			log.Printf("[WARNING] Failed getting AI response: %s", err)
-			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed getting AI response. Contact support."}`))
-			resp.WriteHeader(500)
-			resp.Write(respBody)
-			return respBody, err
-		}
+		if selectedAction.Name == "custom_action" { 
+			//originalFields := []shuffle.Valuereplace{}
+			//for _, param := range selectedAction.Parameters {
+			//	originalFields = append(originalFields, shuffle.Valuereplace{
+			//		Key:   param.Name,
+			//		Value: param.Value,
+			//	})
+			//}
 
-		//log.Printf("[DEBUG] GOT RESPONSE BODY (params): %#v", string(responseBody))
 
-		//log.Printf("\n\n[DEBUG] TRANSLATED REQUEST RETURNED: %s\n\n", string(responseBody))
-		if strings.Contains(string(responseBody), `"success": false`) {
-			log.Printf("[WARNING] Failed running app %s (%s). Contact support.", selectedAction.Name, selectedAction.AppID)
-			resp.WriteHeader(500)
-			resp.Write(responseBody)
-			return responseBody, err
-		}
+			fullUrl := ""
+			outputBody := "The fields are not filled in correctly. Fill in all relevant fields and make sure it is a valid HTTP API request."
+			inputdata := ""
 
-		// Unmarshal responseBody back to
-		newSecondAction := shuffle.Action{}
-		err = json.Unmarshal(responseBody, &newSecondAction)
-		if err != nil {
-			log.Printf("[WARNING] Failed unmarshalling body for execute generated workflow: %s %+v", err, string(responseBody))
-			respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed parsing app response. Contact support if this persists."}`))
-			resp.WriteHeader(500)
-			resp.Write(respBody)
-			return respBody, err
-		}
+			//formattedQueryFields = append(formattedQueryFields, fmt.Sprintf("%s=%s", field.Key, field.Value))
 
-		secondAction.LargeImage = ""
-		missingFields = []string{}
-		for _, param := range newSecondAction.Parameters {
-			if param.Configuration {
-				continue
+			secondAction.Name = originalActionName
+			newOutputAction, _, err := shuffle.RunSelfCorrectingRequest(formattedQueryFieldsValueReplace, secondAction, 400, formattedQuery, fullUrl, outputBody, secondAction.AppName, value.Query, inputdata, 0)
+			//func RunSelfCorrectingRequest(originalFields []Valuereplace, action Action, status int, additionalInfo, fullUrl, outputBody, appname, inputdata string, attempt ...int) (Action, string, error) {
+
+			if err != nil {
+				log.Printf("[ERROR] Failed running self-correcting request for custom action: %s", err)
+			} else {
+				newOutputAction.Name = "custom_action"
+				secondAction = newOutputAction
+			}
+		} else {
+			responseBody, err := GetActionAIResponseWrapper(ctx, newQueryInput)
+			if err != nil {
+				log.Printf("[WARNING] Failed getting AI response: %s", err)
+				respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed getting AI response. Contact support."}`))
+				resp.WriteHeader(500)
+				resp.Write(respBody)
+				return respBody, err
 			}
 
-			for paramIndex, originalParam := range secondAction.Parameters {
-				if originalParam.Name != param.Name {
+			if strings.Contains(string(responseBody), `"success": false`) {
+				log.Printf("[WARNING] Failed running app %s (%s). Contact support.", selectedAction.Name, selectedAction.AppID)
+				resp.WriteHeader(500)
+				resp.Write(responseBody)
+				return responseBody, err
+			}
+
+			// Unmarshal responseBody back to
+			newSecondAction := shuffle.Action{}
+			err = json.Unmarshal(responseBody, &newSecondAction)
+			if err != nil {
+				log.Printf("[WARNING] Failed unmarshalling body for execute generated workflow: %s %+v", err, string(responseBody))
+				respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Failed parsing app response. Contact support if this persists."}`))
+				resp.WriteHeader(500)
+				resp.Write(respBody)
+				return respBody, err
+			}
+
+			secondAction.LargeImage = ""
+			missingFields = []string{}
+			for _, param := range newSecondAction.Parameters {
+				if param.Configuration {
 					continue
 				}
 
-				if len(param.Value) > 0 && param.Value != originalParam.Value {
-					secondAction.Parameters[paramIndex].Value = param.Value
-					secondAction.Parameters[paramIndex].Tags = param.Tags
-				}
+				for paramIndex, originalParam := range secondAction.Parameters {
+					if originalParam.Name != param.Name {
+						continue
+					}
 
-				//log.Printf("[INFO] Required - Key: %s, Value: %#v", param.Name, param.Value)
-				if originalParam.Required && len(secondAction.Parameters[paramIndex].Value) == 0 {
-					missingFields = append(missingFields, param.Name)
-				}
+					if len(param.Value) > 0 && param.Value != originalParam.Value {
+						secondAction.Parameters[paramIndex].Value = param.Value
+						secondAction.Parameters[paramIndex].Tags = param.Tags
+					}
 
-				break
+					//log.Printf("[INFO] Required - Key: %s, Value: %#v", param.Name, param.Value)
+					if originalParam.Required && len(secondAction.Parameters[paramIndex].Value) == 0 {
+						missingFields = append(missingFields, param.Name)
+					}
+
+					break
+				}
 			}
 		}
 	}
 
 	for paramIndex, param := range secondAction.Parameters {
-		secondAction.Parameters[paramIndex].Example = ""
 		if param.Name == "headers" && len(param.Value) == 0 {
 			secondAction.Parameters[paramIndex].Value = "Content-Type: application/json"
 		}
@@ -2230,11 +2267,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//return respBody, errors.New("Not all required fields were found")
 		}
 
-
-		// Used for testing if params are as they should be
-		//for _, param := range secondAction.Parameters {
-		//	log.Printf("PARAM: %s: %s", param.Name, param.Value)
-		//}
 
 		preparedAction, err := json.Marshal(secondAction)
 		if err != nil {
@@ -2315,7 +2347,18 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			resp.Header().Set("x-appid", selectedApp.ID)
 		}
 
-		for i := 0; i < maxRerunAttempts ; i++ {
+		if selectedAction.Name == "custom_action" || value.Label == "custom_action" || selectedAction.Name == "api" || value.Label == "api" {
+			foundName, foundLabels = IdentifyCustomAction(
+				ctx,
+				selectedApp,
+				selectedAction.Name,
+				value.Label,
+				value.Fields,
+				secondAction.Parameters,
+			)
+		}
+
+		for i := 0; i < maxRerunAttempts; i++ {
 
 			// This is an autocorrective measure to ensure ALL fields
 			// have been filled in accordance to the input from the user.
@@ -2327,7 +2370,12 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 			// FIXME: How to deal with random fields here?
 			if debug && len(missingBodyParams) > 0 { 
-				log.Printf("\n\n\nMISSING PARAMS (%s => %s): %#v\n\n\n", originalActionName, secondAction.Name, missingBodyParams)
+				parsedParams := ""
+				for _, param := range secondAction.Parameters {
+					parsedParams = fmt.Sprintf("%s%s: '%s'\n", parsedParams, param.Name, param.Value)
+				}
+
+				log.Printf("\n\n\nMISSING PARAMS (%s => %s): %#v. Available params:\n%s\n\n\n", originalActionName, secondAction.Name, missingBodyParams, parsedParams)
 			}
 
 			if len(missingBodyParams) > 0 {
@@ -2410,6 +2458,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				//	log.Printf("\n\n[DEBUG] Attempt preparedAction (url: %s): %s\n\n", apprunUrl, string(preparedAction))
 				//}
 
+
 				req, err := http.NewRequest(
 					"POST",
 					apprunUrl,
@@ -2462,6 +2511,19 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					resp.WriteHeader(500)
 					resp.Write(respBody)
 					return respBody, err
+				}
+
+				// Only try to gunzip if the header claims gzip
+				if strings.EqualFold(newresp.Header.Get("Content-Encoding"), "gzip") {
+					zr, err := gzip.NewReader(bytes.NewReader(apprunBody))
+					if err == nil {
+						defer zr.Close()
+
+						decompressed, err := io.ReadAll(zr)
+						if err == nil {
+							apprunBody = decompressed
+						}
+					}
 				}
 			}
 
@@ -2594,9 +2656,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					}
 
 					if standalone { 
-						shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, originalActionName, param.Name, param.Value)
+						shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, originalActionName, param.Name, param.Value, param.Example)
 					} else {
-						go shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, originalActionName, param.Name, param.Value)
+						go shuffle.UploadParameterBase(context.Background(), value.Fields, user.ActiveOrg.Id, selectedApp.ID, secondAction.Name, originalActionName, param.Name, param.Value, param.Example)
 					}
 				}
 
@@ -2842,6 +2904,15 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//}
 
 			parsedTranslation.Retries = i + 1
+
+			if len(foundName) > 0 {
+				log.Printf("[DEBUG] Reverse lookup SUCCESS! Name: '%s', Labels: %v", foundName, foundLabels)
+				parsedTranslation.ActionName = foundName
+			}
+			if len(foundLabels) > 0 {
+				parsedTranslation.CategoryLabels = foundLabels
+			}
+
 			marshalledOutput, err := json.Marshal(parsedTranslation)
 			if err != nil {
 				log.Printf("[WARNING] Failed marshalling schemaless output for label %s: %s", value.Label, err)
@@ -2858,12 +2929,19 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 		log.Printf("[ERROR] Done in autocorrect loop after %d iterations. This means Singul failure for action '%s' in org %s.", maxRerunAttempts, secondAction.Name, user.ActiveOrg.Id)
 
-
 		//parsedHttp, err := json.Marshal(httpOutput)
 		parsedTranslation.Retries = maxRerunAttempts
 		parsedTranslation.Success = false
 		parsedTranslation.RawResponse = httpOutput
 		parsedTranslation.Output = httpOutput.Body
+
+		if len(foundName) > 0 {
+			parsedTranslation.ActionName = foundName
+		}
+		if len(foundLabels) > 0 {
+			parsedTranslation.CategoryLabels = foundLabels
+		}
+
 		parsedOutput, err := json.Marshal(parsedTranslation)
 		if err != nil {
 			resp.WriteHeader(500)
@@ -3065,6 +3143,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	}
 
 	returnBody := shuffle.HandleRetValidation(ctx, workflowExecution, len(parentWorkflow.Actions))
+
 	selectedApp.LargeImage = ""
 	selectedApp.Actions = []shuffle.WorkflowAppAction{}
 	structuredFeedback := shuffle.StructuredCategoryAction{
@@ -3076,6 +3155,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		Reason:         "Analyze Result for details",
 		ApiDebuggerUrl: fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID),
 		Result:         returnBody.Result,
+	}
+
+	if len(foundName) > 0 {
+		structuredFeedback.ActionName = foundName
+	}
+
+	if len(foundLabels) > 0 {
+		structuredFeedback.CategoryLabels = foundLabels
 	}
 
 	jsonParsed, err := json.Marshal(structuredFeedback)
@@ -3167,6 +3254,7 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 			continue
 		}
 
+		param.Example = param.Value
 		newParams = append(newParams, param)
 	}
 
@@ -3199,8 +3287,6 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 		*/
 
 		if !found {
-
-			// FIXME: For now just handles POST due to testing
 			for path, methodData := range openapiSpec.Paths {
 				if methodData.Get != nil {
 					parsedSummary := fmt.Sprintf("get_%s", strings.ReplaceAll(strings.ToLower(methodData.Get.Summary), " ", "_"))
@@ -3313,11 +3399,13 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 			}
 
 			//customActionParam.Value = path
+			customActionParam.Example = customActionParam.Value
 			action.Parameters = append(action.Parameters, customActionParam)
 
 		}
 	}
 
+	queriesIndex := -1
 	bodyIndex := -1
 	removeBody := false 
 	for paramIndex, param := range action.Parameters {
@@ -3334,11 +3422,25 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 		if param.Name == "body" {
 			bodyIndex = paramIndex
 		}
+
+		if param.Name == "queries" {
+			queriesIndex = paramIndex
+		}
 	}
 
 	if bodyIndex != -1 && removeBody {
 		// Make a safe remove
 		action.Parameters = append(action.Parameters[:bodyIndex], action.Parameters[bodyIndex+1:]...)
+	}
+
+	if queriesIndex == -1 {
+		customActionParam := shuffle.WorkflowAppActionParameter{
+			Name:  "queries",
+			Value: "",
+			Example: "",
+		}
+
+		action.Parameters = append(action.Parameters, customActionParam)
 	}
 
 	if !originalActionNameFound {
@@ -4136,8 +4238,7 @@ func handleStandaloneExecution(workflow shuffle.Workflow) ([]byte, error) {
 }
 
 func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace, org shuffle.Org, action shuffle.WorkflowAppAction, originalActionName string) shuffle.WorkflowAppAction {
-	//if strings.ToLower(action.AppName) == "http" || action.Name == "custom_action" {
-	if strings.ToLower(action.AppName) == "http" || (action.Name == "custom_action" && originalActionName == "custom_action") {
+	if strings.ToLower(action.AppName) == "http" || (action.Name == "custom_action" && originalActionName == "custom_action" && len(fields) == 0) {
 		if debug {
 			log.Printf("[DEBUG] Skipping org specific parameters for HTTP or custom_action")
 		}
@@ -4145,12 +4246,24 @@ func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace
 		return action
 	}
 
+	// FIXME: Subpathing here could be useful to not always re-parse
+	// Gets an md5 based on input keys, as to make sure we get the correct file
+	md5Identifier := ""
+	if action.Name == "custom_action" {
+		fieldsParsed := []string{}
+		for _, field := range fields {
+			fieldsParsed = append(fieldsParsed, field.Key)
+		}
+
+		// Sort it 
+		sort.Strings(fieldsParsed)
+		md5Identifier = fmt.Sprintf("%x", md5.Sum([]byte(strings.Join(fieldsParsed, "|"))))
+	}
+
 	if debug {
 		log.Printf("[DEBUG] Checking for org specific parameters for org %s (%s) and action %s", org.Name, org.Id, action.Name)
 	}
 
-
-	//log.Printf("\n\n[DEBUG] LOADING ORG SPECIFIC PARAMETERS\n\n")
 	for paramIndex, param := range action.Parameters {
 		if param.Configuration && param.Name != "url" {
 			continue
@@ -4160,13 +4273,22 @@ func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace
 			continue
 		}
 
-		//fileId := fmt.Sprintf("file_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(action.Name), " ", "_", -1), strings.ToLower(param.Name))
+		// Setting before to ensure overrides can work
+		action.Parameters[paramIndex].Example = action.Parameters[paramIndex].Value
+
 		fileId := fmt.Sprintf("file_parameter_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(originalActionName), " ", "_", -1), strings.ToLower(param.Name))
 
 		// Ensures we load from the correct folder
 		if standalone {
 			fileId = fmt.Sprintf("file_parameter_%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), strings.Replace(strings.ToLower(originalActionName), " ", "_", -1), strings.ToLower(param.Name))
 			fileId = fmt.Sprintf("app_defaults/%s", fileId)
+		}
+
+		if action.Name == "custom_action" && len(md5Identifier) > 0 {
+			fileId = fmt.Sprintf("file_parameter_%s-%s-%s-%s-%s.json", org.Id, strings.ToLower(action.AppID), md5Identifier, strings.Replace(strings.ToLower(originalActionName), " ", "_", -1), strings.ToLower(param.Name))
+			if standalone {
+				fileId = fmt.Sprintf("app_defaults/%s", fileId)
+			}
 		}
 
 		file, err := shuffle.GetFileSingul(ctx, fileId)
@@ -4191,13 +4313,14 @@ func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace
 			continue
 		}
 
+
+		// FIXME: What happens here?
 		stringContent := string(content)
 		for _, field := range fields {
 			stringContent = strings.ReplaceAll(stringContent, fmt.Sprintf("{%s}", field.Key), field.Value)
 		}
 
 		action.Parameters[paramIndex].Value = stringContent
-		action.Parameters[paramIndex].Example = stringContent
 	}
 
 	return action
@@ -4812,4 +4935,203 @@ func HandleSingulStartnode(execution shuffle.WorkflowExecution, action shuffle.A
 	}
 
 	return action, urls
+}
+
+func IdentifyCustomAction(ctx context.Context, app shuffle.WorkflowApp, actionName string, actionLabel string, inputFields []shuffle.Valuereplace, actionParams []shuffle.WorkflowAppActionParameter) (string, []string) {
+
+	isCustom := false
+	if actionName == "custom_action" || actionLabel == "custom_action" || actionName == "api" || actionLabel == "api" {
+		isCustom = true
+	}
+
+	if !isCustom {
+		return "", []string{}
+	}
+
+	foundMethod := ""
+	foundUrl := ""
+
+	// Prioritize finding URL/Method from the Actual Input Fields (runtime input)
+	for _, field := range inputFields {
+		if strings.EqualFold(field.Key, "method") {
+			foundMethod = field.Value
+		}
+		if strings.EqualFold(field.Key, "url") || strings.EqualFold(field.Key, "path") {
+			foundUrl = field.Value
+		}
+	}
+
+	if len(foundUrl) == 0 || len(foundMethod) == 0 {
+		for _, param := range actionParams {
+			if param.Name == "method" && len(foundMethod) == 0 {
+				foundMethod = param.Value
+			}
+			if (param.Name == "url" || param.Name == "path") && len(foundUrl) == 0 {
+				foundUrl = param.Value
+			}
+		}
+	}
+
+	if len(foundMethod) == 0 || len(foundUrl) == 0 {
+		return "", []string{}
+	}
+
+	type CachedReverseAction struct {
+		Name   string   `json:"name"`
+		Labels []string `json:"labels"`
+	}
+
+	cacheKey := fmt.Sprintf("singul_reverse_%s_%s_%s", app.Name, foundMethod, foundUrl)
+	// Try to get from cache
+	cache, err := shuffle.GetCache(ctx, cacheKey)
+	if err == nil {
+		if cacheData, ok := cache.([]byte); ok {
+			var cachedResult CachedReverseAction
+			if json.Unmarshal(cacheData, &cachedResult) == nil && len(cachedResult.Name) > 0 {
+				return cachedResult.Name, cachedResult.Labels
+			}
+		}
+	}
+
+	// Perform the Reverse Lookup
+	fLabels, fName, err := FindMatchingActionFromURL(ctx, app, foundMethod, foundUrl)
+	if err != nil {
+		log.Printf("[DEBUG] Reverse lookup failed for %s %s: %v", foundMethod, foundUrl, err)
+		return "", []string{}
+	}
+
+	normalizedLabels := []string{}
+	for _, l := range fLabels {
+		norm := strings.ToLower(strings.ReplaceAll(l, " ", "_"))
+		normalizedLabels = append(normalizedLabels, norm)
+	}
+
+	toCache := CachedReverseAction{
+		Name:   fName,
+		Labels: normalizedLabels,
+	}
+
+	cacheData, err := json.Marshal(toCache)
+	if err != nil {
+		log.Printf("[WARNING] Failed to marshal cache data for reverse lookup: %v", err)
+	} else {
+		err = shuffle.SetCache(ctx, cacheKey, cacheData, 259200)
+		if err != nil {
+			log.Printf("[WARNING] Failed to set cache for reverse lookup: %v", err)
+		}
+	}
+
+	return fName, normalizedLabels
+}
+
+// Finds the original action based on the URL and Method used in a custom_action
+func FindMatchingActionFromURL(ctx context.Context, app shuffle.WorkflowApp, method string, urlStr string) ([]string, string, error) {
+	if app.ID == "" || app.Name == "" {
+		return []string{}, "", fmt.Errorf("App mismatch")
+	}
+
+	// Only relevant for generated apps with specs
+	if !app.Generated {
+		return []string{}, "", fmt.Errorf("Not a generated app")
+	}
+
+	_, openapiSpec, err := shuffle.GetAppSingul("", app.Name)
+	if err != nil || openapiSpec == nil || openapiSpec.Info == nil {
+		return []string{}, "", fmt.Errorf("Failed to load spec")
+	}
+
+	parsedUrl, err := url.Parse(urlStr)
+	if err != nil {
+		return []string{}, "", fmt.Errorf("Failed to parse URL: %s", err)
+	}
+
+	// Match parsedUrl.Path against keys in openapiSpec.Paths
+	inputPath := parsedUrl.Path
+	method = strings.ToUpper(method)
+
+	for specPath, methodData := range openapiSpec.Paths {
+
+		// 1. Check Method match first (Optimization)
+		var summary string
+		if method == "GET" && methodData.Get != nil {
+			summary = methodData.Get.Summary
+		} else if method == "POST" && methodData.Post != nil {
+			summary = methodData.Post.Summary
+		} else if method == "PUT" && methodData.Put != nil {
+			summary = methodData.Put.Summary
+		} else if method == "PATCH" && methodData.Patch != nil {
+			summary = methodData.Patch.Summary
+		} else if method == "DELETE" && methodData.Delete != nil {
+			summary = methodData.Delete.Summary
+		} else {
+			continue
+		}
+
+		// 2. Check Path Match via Suffix (handles base path differences)
+		specParts := strings.Split(specPath, "/")
+		inputParts := strings.Split(inputPath, "/")
+
+		// Filter empty strings resulting from leading/trailing slashes
+		var cleanSpecParts []string
+		for _, p := range specParts {
+			if p != "" {
+				cleanSpecParts = append(cleanSpecParts, p)
+			}
+		}
+		var cleanInputParts []string
+		for _, p := range inputParts {
+			if p != "" {
+				cleanInputParts = append(cleanInputParts, p)
+			}
+		}
+
+		if len(cleanSpecParts) > len(cleanInputParts) {
+			continue
+		}
+
+		match := true
+		offset := len(cleanInputParts) - len(cleanSpecParts)
+
+		for i := 0; i < len(cleanSpecParts); i++ {
+			specPart := cleanSpecParts[i]
+			inputPart := cleanInputParts[offset+i]
+
+			if strings.HasPrefix(specPart, "{") && strings.HasSuffix(specPart, "}") {
+				// Wildcard match
+				continue
+			}
+
+			if specPart != inputPart {
+				match = false
+				break
+			}
+		}
+
+		if match {
+			// Found matching path/method. Now look up the Action definition.
+			for _, action := range app.Actions {
+
+				// Check loose match on Name/Summary
+				if strings.EqualFold(action.Name, summary) ||
+					strings.EqualFold(strings.ReplaceAll(action.Name, "_", " "), summary) {
+					return action.CategoryLabel, action.Name, nil
+				}
+
+				// Check constructed generated name format (method_summary)
+				constructedName := fmt.Sprintf("%s_%s", strings.ToLower(method), strings.ReplaceAll(strings.ToLower(summary), " ", "_"))
+				if strings.HasPrefix(constructedName, fmt.Sprintf("%s_%s_", strings.ToLower(method), strings.ToLower(method))) {
+					constructedName = strings.Replace(constructedName, fmt.Sprintf("%s_", strings.ToLower(method)), "", 1)
+				}
+
+				if action.Name == constructedName {
+					return action.CategoryLabel, action.Name, nil
+				}
+			}
+
+			// Fallback: return summary as label if no explicit Action struct match found
+			return []string{strings.ReplaceAll(strings.ToLower(summary), " ", "_")}, summary, nil
+		}
+	}
+
+	return []string{}, "", fmt.Errorf("No match found")
 }
