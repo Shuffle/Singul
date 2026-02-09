@@ -3126,7 +3126,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		return respBody, errors.New("Failed running app")
 	}
 
-	returnBody := shuffle.HandleRetValidation(ctx, workflowExecution, len(parentWorkflow.Actions))
+	returnBody := shuffle.HandleRetValidation(ctx, workflowExecution, len(parentWorkflow.Actions), 15)
 
 	selectedApp.LargeImage = ""
 	selectedApp.Actions = []shuffle.WorkflowAppAction{}
