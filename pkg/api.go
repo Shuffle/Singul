@@ -336,7 +336,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 	}
 
 	if debug { 
-		log.Printf("[DEBUG] Translating label %s with body:\n%s\n\n", value.Label, string(marshalledFields))
+		log.Printf("[DEBUG] Translating label '%s' with body:\n%s\n\n", value.Label, string(marshalledFields))
 	}
 
 
@@ -405,6 +405,10 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 	curOrg := orgId
 	foundLabelSplit := strings.Split(value.Label, "_")
 
+	if len(value.AppName) == 0 && len(secondAction.AppName) > 0 {
+		value.AppName = secondAction.AppName
+	}
+
 	// .Output = translated
 	// .RawResponse = original (raw)
 	if foundArray, ok := parsedTranslation.Output.([]interface{}); ok {
@@ -458,6 +462,13 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 				// Check if lower case exists
 				for key, mapValue := range generatedItem {
 					if strings.ToLower(key) != idKey {
+
+						// Fallback for id/uid etc.
+						if idKey != "id" && strings.Contains(key, idKey) && len(fmt.Sprintf("%v", mapValue)) < 100 && len(fmt.Sprintf("%v", mapValue)) > 4 {
+							foundIdentifier = fmt.Sprintf("%v", mapValue)
+							foundIdentifierKey = key
+						}
+
 						continue
 					}
 
@@ -473,25 +484,6 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 
 				if foundIdentifier != "" && len(foundIdentifier) > 4 {
 					break
-				}
-			}
-
-			// hardcoded override for product name. Just a test.
-			toolKeys := []string{"product", "source", "tool", "service", "application", "app"}
-			if len(secondAction.AppName) > 0 { 
-				for _, toolKey := range toolKeys {
-					for key, mapValue := range generatedItem {
-						if strings.ToLower(key) != toolKey {
-							continue
-						}
-
-						// Found the key, set it to the appname
-						if _, ok := mapValue.(string); ok {
-							generatedItem[key] = strings.ToLower(secondAction.AppName)
-							break
-						}
-
-					}
 				}
 			}
 
@@ -520,6 +512,34 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 			if len(foundIdentifierKey) > 0 && len(foundIdentifier) > 0 {
 				generatedItem[foundIdentifierKey] = foundIdentifier
 			}
+
+			// hardcoded override for product name. Just a test.
+			if len(value.AppName) > 0 {
+				generatedItem["shuffle_source"] = strings.ToLower(value.AppName)
+
+				if sourceVal, ok := generatedItem["source"]; ok {
+					if _, ok := sourceVal.(string); ok {
+						generatedItem["source"] = strings.ToLower(value.AppName)
+					}
+				} 
+
+				if sourceVal, ok := generatedItem["product"]; ok {
+					if _, ok := sourceVal.(string); ok {
+						generatedItem["product"] = strings.ToLower(value.AppName)
+					} else if sourceMap, ok := sourceVal.(map[string]interface{}); ok {
+						if nameVal, ok := sourceMap["name"]; ok {
+							if _, ok := nameVal.(string); ok {
+								sourceMap["name"] = strings.ToLower(value.AppName)
+							}
+						}
+
+						generatedItem["product"] = sourceMap
+					}
+				}
+			}
+
+			// Provide a short triage plan for the incident in english and update it in the internal shuffle datastore with the same key and category 'shuffle-security_incidents'.   Make sure it is JSON formatted like {"tasks": []} so that we can inject it in existing data. Some incidents are duds and should be closed quickly. Others are important ones. Others are missing important details. Use the following format for each task, and ONLY update the relevant fields: [{"assignee": "AI Agent", "title": "Title of the task", "category": "triage/containment/recovery/communication/documentation", "completed": false, "createdBy": "ai-agent@shuffler.io"}]. ONLY output as JSON and nothing more.   If the incident has RELEVANT tasks, add to them if necessary. When done, ALWAYS make sure the "status" is inProgress.
+			// Go through each task one by one if there are any. When starting them, self-assign yourself to make it clear you are working on it. Go in the order of incident response relevance, which is typically in order. If a task is irrelevant, set "disabled": true as a value for it.  Before starting, get "agent_permissions" from "shuffle-security_configuration". This has a list of permissions you NEED to follow. This extends the reach of tools and capabilities you are allowed to use. ONLY use the permissions that are enabled. 
 
 			// Check if we have already uploaded it recently based on identifier
 			cacheKey := fmt.Sprintf("singul_%s_%s", orgId, foundIdentifier)
