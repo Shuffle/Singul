@@ -3465,10 +3465,16 @@ func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
 	foundUrl := ""
 	newFields := []shuffle.Valuereplace{}
 	for _, field := range value.Fields {
+		lowerKey := strings.ToLower(field.Key)
+
+		// Don't skip proper HTTP fields (headers, body, etc) even if they're JSON
+		isProperHttpField := lowerKey == "headers" || lowerKey == "body" || lowerKey == "url" || lowerKey == "method"
 
 		// Looks for the HTTP 'GET <url>' pattern pre-headers
-		if (strings.Contains(field.Value, "http") && strings.Contains(field.Value, "://") && (strings.Contains(field.Value, "GET") || strings.Contains(field.Value, "POST") || strings.Contains(field.Value, "PUT") || strings.Contains(field.Value, "PATCH") || strings.Contains(field.Value, "DELETE"))) || strings.HasPrefix(field.Value, "{") && strings.HasSuffix(field.Value, "}") {
-			if debug { 
+		// BUT: Don't apply this logic to proper HTTP fields like headers/body
+		if !isProperHttpField && ((strings.Contains(field.Value, "http") && strings.Contains(field.Value, "://") && (strings.Contains(field.Value, "GET") || strings.Contains(field.Value, "POST") || strings.Contains(field.Value, "PUT") || strings.Contains(field.Value, "PATCH") || strings.Contains(field.Value, "DELETE"))) || (strings.HasPrefix(field.Value, "{") && strings.HasSuffix(field.Value, "}"))) {
+			log.Printf("[HEYOOO] Singul - Found HTTP request in field %s: %s", field.Key, field.Value)
+			if debug {
 				log.Printf("[INFO] Skipping and auto-mapping field %s in HTTP custom action due to probable URL+method value: %s", field.Key, field.Value)
 			}
 
@@ -3512,18 +3518,18 @@ func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
 			continue
 		}
 
-		if strings.ToLower(field.Key) == "url" {
+		if lowerKey == "url" {
 			urlFound = true
 		}
 
-		if strings.ToLower(field.Key) == "method" {
+		if lowerKey == "method" {
 			value.Label = strings.ToUpper(field.Value)
 			value.Action = value.Label
 			continue
 		}
 
-		if strings.ToLower(field.Key) == "body" {
-			// Try to unmarshal it 
+		if lowerKey == "body" {
+			// Try to unmarshal it
 			err := json.Unmarshal([]byte(field.Value), &parsedBody)
 			if err == nil {
 				log.Printf("[INFO] Mapped body field to HTTP custom action body")
@@ -3542,26 +3548,38 @@ func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
 
 	// Extra mapping handlers. This is in case the incomg data was in a weird format
 	// LLMs do be unstructured (:
-	parsedNewfields := []shuffle.Valuereplace{}
-	for key, originalVal := range parsedBody {
-		val := ""
-		if foundVal, ok := originalVal.(string); ok {
-			val = foundVal
-		} else if foundVal, ok := originalVal.(float64); ok {
-			val = fmt.Sprintf("%f", foundVal)
-		} else if foundVal, ok := originalVal.(bool); ok {
-			val = fmt.Sprintf("%t", foundVal)
-		} else if foundVal, ok := originalVal.(int); ok {
-			val = fmt.Sprintf("%d", foundVal)
-		} else {
-			marshalledVal, err := json.Marshal(originalVal)
-			if err != nil {
-				log.Printf("[WARNING] Skipping field %s in HTTP custom action due to unmarshalable value: %#v", key, originalVal)
-				continue
-			} else {
-				val = string(marshalledVal)
-			}
+	// ONLY use this if we don't already have proper fields (url, body, headers, method)
+	hasProperFields := false
+	for _, field := range newFields {
+		lowerKey := strings.ToLower(field.Key)
+		if lowerKey == "url" || lowerKey == "body" || lowerKey == "headers" {
+			hasProperFields = true
+			break
 		}
+	}
+
+	// Only parse body into separate fields if we don't have proper HTTP fields already
+	if !hasProperFields && len(parsedBody) > 0 {
+		parsedNewfields := []shuffle.Valuereplace{}
+		for key, originalVal := range parsedBody {
+			val := ""
+			if foundVal, ok := originalVal.(string); ok {
+				val = foundVal
+			} else if foundVal, ok := originalVal.(float64); ok {
+				val = fmt.Sprintf("%f", foundVal)
+			} else if foundVal, ok := originalVal.(bool); ok {
+				val = fmt.Sprintf("%t", foundVal)
+			} else if foundVal, ok := originalVal.(int); ok {
+				val = fmt.Sprintf("%d", foundVal)
+			} else {
+				marshalledVal, err := json.Marshal(originalVal)
+				if err != nil {
+					log.Printf("[WARNING] Skipping field %s in HTTP custom action due to unmarshalable value: %#v", key, originalVal)
+					continue
+				} else {
+					val = string(marshalledVal)
+				}
+			}
 
 		if len(val) == 0 {
 			log.Printf("[WARNING] Singul - Skipping empty field %s in HTTP custom action", key)
@@ -4679,11 +4697,17 @@ Your goal is to identify the service the request should belong to, not necessari
 If the URL and fields clearly match a known service, return that service even if the intent text disagrees.
 If the request does not strongly match any known service and appears to be a generic or custom HTTP call, return "http"
 
+IMPORTANT: If the request already contains authentication credentials (API keys, tokens, bearer tokens in headers, bot tokens in URL, etc.), 
+return "http" because the user has already provided auth and wants to make a direct HTTP call.
+Do NOT try to map it to a specific app when auth is already present.
+
 Examples:
 - gmail.googleapis.com → Gmail
 - slack.com/api → Slack  
 - api.github.com → GitHub
 - random-api.com → http
+- api.telegram.org/bot123456:TOKEN/sendMessage → http (has bot token, keep as HTTP)
+- any URL with Authorization header → http (has auth, keep as HTTP)
 
 Output rules:
 Return only the service or app name.
