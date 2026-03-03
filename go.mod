@@ -9,9 +9,9 @@ toolchain go1.24.4
 
 require (
 	github.com/frikky/kin-openapi v0.42.0
-	github.com/frikky/schemaless v0.0.28
+	github.com/frikky/schemaless v0.0.29
 	github.com/satori/go.uuid v1.2.0
-	github.com/shuffle/shuffle-shared v0.9.84
+	github.com/shuffle/shuffle-shared v1.0.2
 	github.com/spf13/cobra v1.9.1
 )
 
@@ -44,7 +44,6 @@ require (
 	github.com/cncf/xds/go v0.0.0-20250121191232-2f005788dc42 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
-	github.com/coreos/go-oidc/v3 v3.17.0 // indirect
 	github.com/cyphar/filepath-securejoin v0.4.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
