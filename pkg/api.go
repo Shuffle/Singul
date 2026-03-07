@@ -20,7 +20,6 @@ import (
 	"os/exec"
 	"time"
 	"strings"
-	"reflect"
 	"path/filepath"
 
 	uuid "github.com/satori/go.uuid"
@@ -418,16 +417,18 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 		foundArray = append(foundArray, innerMap)
 	}
 
-	if debug { 
-		log.Printf("\n\n\nAUTO UPLOAD FUNCTION: EXIT ON PURPOSE TO LOOK FOR GMAIL -> '%s'. Data type: %#v\n\nTYPE: %#v\n\n\n", value.Label, parsedTranslation.Output, reflect.TypeOf(parsedTranslation.Output))
-	}
+	//if debug { 
+	//	log.Printf("\n\n\nAUTO UPLOAD FUNCTION: EXIT ON PURPOSE TO LOOK FOR GMAIL -> '%s'. Data type: %#v\n\nTYPE: %#v\n\n\n", value.Label, parsedTranslation.Output, reflect.TypeOf(parsedTranslation.Output))
+	//}
 
 	isListRequest := false
 
 	// .Output = translated
 	// .RawResponse = original (raw)
 	//if foundArray, ok := parsedTranslation.Output.([]interface{}); ok {
-	log.Printf("[DEBUG] Found list/search output for label '%s'. Array Length: %d", value.Label, len(foundArray))
+	if debug { 
+		log.Printf("[DEBUG] Found get/list/search output for label '%s' during upload. Array Length: %d", value.Label, len(foundArray))
+	}
 
 	actualLabel := strings.ToLower(strings.Join(foundLabelSplit[1:], "_"))
 	if len(actualLabel) == 0 {
@@ -447,16 +448,29 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 		}
 	}
 
+	// Avoids isListRequest override
+	if actualLabel == "ticket" || actualLabel == "user" || actualLabel == "asset" || actualLabel == "contact" || actualLabel == "alert" || actualLabel == "case" || actualLabel == "event" || actualLabel == "domain" || actualLabel == "ip" || actualLabel == "url" || actualLabel == "file" {
+		actualLabel = fmt.Sprintf("%ss", actualLabel)
+	}
+
+	if strings.HasPrefix(actualLabel, "get_") {
+		actualLabel = strings.TrimPrefix(actualLabel, "get_")
+	} else if strings.HasPrefix(actualLabel, "list_") {
+		actualLabel = strings.TrimPrefix(actualLabel, "list_")
+	} else if strings.HasPrefix(actualLabel, "search_") {
+		actualLabel = strings.TrimPrefix(actualLabel, "search_")
+	}
+
 	if actualLabel == "tickets" || actualLabel == "alerts" || actualLabel == "cases" || actualLabel == "messages" || actualLabel == "chats" || actualLabel == "incidents" {
-		actualLabel = "shuffle-security incidents"
+		actualLabel = "shuffle-security_incidents"
 	}
 
 	if actualLabel == "assets" || actualLabel == "endpoints" {
-		actualLabel = "shuffle-security assets"
+		actualLabel = "shuffle-security_assets"
 	}
 
 	if actualLabel == "users" {
-		actualLabel = "shuffle-security users"
+		actualLabel = "shuffle-security_users"
 	}
 
 	allEntries := []shuffle.CacheKeyData{}
@@ -589,12 +603,15 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 
 		shuffle.SetCache(ctx, cacheKey, []byte("true"), 60*60*24*3) // 3 days as we don't want to keep running the same one over and over.
 
-		//marshalledBody, err := json.Marshal(item)
 		marshalledBody, err := json.Marshal(generatedItem)
 		if err != nil {
 			log.Printf("[ERROR] Failed marshalling item in schemaless output for label %s: %s", value.Label, err)
 			continue
 		}
+
+		//if debug { 
+		//	log.Printf("[DEBUG] Uploading '%s' in category '%s' with data %s", foundIdentifier, actualLabel, string(marshalledBody))
+		//}
 
 		datastoreEntry := shuffle.CacheKeyData{
 			Key: foundIdentifier,
@@ -603,7 +620,6 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 		}
 	
 		allEntries = append(allEntries, datastoreEntry)
-
 		if cnt > 100 {
 			break
 		}
@@ -1966,12 +1982,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				missingFields = append(missingFields, field.Key)
 			}
 		}
-
-		/*
-		if debug { 
-			log.Printf("[DEBUG] Not all required fields were handled (1). Missing: %#v. Should force use of all fields? Handled fields: %3v", missingFields, handledRequiredFields)
-		}
-		*/
 	}
 
 	// Send request to /api/v1/conversation with this data
@@ -2151,6 +2161,38 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
+	// Arbitrary lookup of field value in other fields as it may have been
+	// replaced already
+	newMissingFields := []string{}
+	for _, missingField := range missingFields {
+		relevantValue := ""
+		for _, field := range value.Fields {
+			if field.Key == missingField {
+				relevantValue = field.Value
+				break
+			}
+		}
+
+		// Handle it properly
+		if len(relevantValue) >= 4 {
+			found := false
+			for _, param := range secondAction.Parameters {
+				if strings.Contains(param.Value, relevantValue) {
+					found = true 
+					break
+				}
+			}
+
+			if found { 
+				continue
+			}
+		}
+
+		newMissingFields = append(newMissingFields, missingField)
+	}
+
+	missingFields = newMissingFields
+
 	// AI fallback mechanism to handle missing fields
 	// This is in case some fields are not sent in properly
 	orgId := ""
@@ -2227,7 +2269,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//func RunSelfCorrectingRequest(originalFields []Valuereplace, action Action, status int, additionalInfo, fullUrl, outputBody, appname, inputdata string, attempt ...int) (Action, string, error) {
 
 			if err != nil {
-				log.Printf("[ERROR] Failed running self-correcting request for custom action: %s", err)
+				log.Printf("[ERROR] Failed running self-correcting request for custom_action: %s", err)
+
+				// :thinking: => This was added March 2026 to refix custom action mapping
+				newOutputAction.Name = "custom_action"
+				secondAction = newOutputAction
 			} else {
 				newOutputAction.Name = "custom_action"
 				secondAction = newOutputAction
@@ -2288,6 +2334,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
+	// This may screw us over e.g. for xml, but autocorrect should solve it 
+	// over time
 	for paramIndex, param := range secondAction.Parameters {
 		if param.Name == "headers" && len(param.Value) == 0 {
 			secondAction.Parameters[paramIndex].Value = "Content-Type: application/json"
@@ -2860,6 +2908,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			outputmap := make(map[string]interface{})
 			schemalessOutput, err := schemaless.Translate(ctx, value.Label, marshalledBody, authConfig)
 			if err != nil {
+				log.Printf("[ERROR] Schemaless failure for label '%s' in org '%s'", value.Label, orgId)
 
 				if value.AppName == "HTTP" || value.App == "HTTP" {
 					parsedTranslation.Success = true
@@ -2877,6 +2926,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					}
 				*/
 			} else {
+				if debug {
+					log.Printf("[DEBUG] In schemaless success pre upload.")
+				}
+
 				parsedTranslation.Success = true
 				//parsedTranslation.RawOutput = string(schemalessOutput)
 
@@ -2939,6 +2992,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 				// Handles the actual uploading itself
 				if len(foundLabelSplit) > 1 && (strings.HasPrefix(value.Label, "list_") || strings.HasPrefix(value.Label, "get_") || strings.HasPrefix(value.Label, "search_")) && len(curApikey) > 0 && len(curOrg) > 0 {
+					if debug { 
+						log.Printf("[DEBUG] Should upload Singul result for label '%s'", value.Label)
+					}
+
 					autoUploadSingulOutput(ctx, curOrg, curApikey, curBackend, parsedTranslation, value, secondAction)
 				} else {
 					log.Printf("\n\nNot uploading. Label: %#v\n\n", value.Label)
@@ -2951,7 +3008,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//}
 
 			parsedTranslation.Retries = i + 1
-
 			if len(foundName) > 0 {
 				log.Printf("[DEBUG] Reverse lookup SUCCESS! Name: '%s', Labels: %v", foundName, foundLabels)
 				parsedTranslation.ActionName = foundName
@@ -3358,9 +3414,9 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 						originalActionName = fmt.Sprintf("get_%s", originalActionName)
 					}
 
-					if debug { 
-						log.Printf("%s & %s", originalActionName, parsedSummary)
-					}
+					//if debug { 
+					//	log.Printf("[DEBUG] %s & %s", originalActionName, parsedSummary)
+					//}
 					//if strings.Contains(originalActionName, "messages_get") && strings.Contains(parsedSummary, "messages_get") {
 						//os.Exit(3)
 					//}
@@ -3548,8 +3604,6 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 		action.Parameters = append(action.Parameters, customActionParam)
 	}
 
-
-	log.Printf("ACTIONNAMEFOUND: %#v => %#v", originalActionName, originalActionNameFound)
 	if !originalActionNameFound {
 		log.Printf("[ERROR] Failed to map original action name '%s' to custom_action parameters. Returning original action.", originalActionName)
 		return action
@@ -4400,10 +4454,6 @@ func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace
 
 		file, err := shuffle.GetFileSingul(ctx, fileId)
 		if err != nil || file.Status != "active" {
-			//if debug { 
-			//	log.Printf("[WARNING] Parameter file %s%s NOT found or not active. Status: %#v. Err: %s", shuffle.GetSingulStandaloneFilepath(), fileId, file.Status, err)
-			//}
-
 			continue
 		}
 
@@ -4420,8 +4470,9 @@ func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace
 			continue
 		}
 
-
-		// FIXME: What happens here?
+		// Prepares for the replacement to work well
+		// E.g. /api/data/{id} => /api/data/1234
+		// Loops all input fields to make sure they get set
 		stringContent := string(content)
 		for _, field := range fields {
 			stringContent = strings.ReplaceAll(stringContent, fmt.Sprintf("{%s}", field.Key), field.Value)
