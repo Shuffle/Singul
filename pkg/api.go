@@ -370,10 +370,12 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 			log.Printf("[ERROR] Singul - Failed unmarshaling schemaless output PRE datastore upload: %s", err)
 		} else {
 			// This is a hack to allow execution auth ((:
+			curExecutionId := ""
 			curOrg := user.ActiveOrg.Id
 			newExecutionId := request.URL.Query().Get("execution_id")
 			if len(newExecutionId) > 0 {
-				curOrg = fmt.Sprintf("execution:%s", newExecutionId)
+				//curOrg = fmt.Sprintf("execution:%s", newExecutionId)
+				curExecutionId = newExecutionId
 			}
 
 			log.Printf("\n\n\nSINGUL UPLOAD - %#v (2)\n\n\n", parsedTranslation)
@@ -381,6 +383,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 				ctx, 
 				curOrg, 
 				authorization, 
+				curExecutionId,
 				baseUrl, 
 				parsedTranslation, 
 				value, 
@@ -400,7 +403,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 // Was made for a... weird format, so we are just continuing to use that
 	
 // orgId is SOMETIMES mapped to executionId in cases for execution auth
-func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string, curBackend string, parsedTranslation shuffle.SchemalessOutput, value shuffle.CategoryAction, secondAction shuffle.Action) {
+func autoUploadSingulOutput(ctx context.Context, orgId, curApikey, curExecutionId, curBackend string, parsedTranslation shuffle.SchemalessOutput, value shuffle.CategoryAction, secondAction shuffle.Action) {
 	// Seems to work when authorization (curApikey) is NOT execution based
 
 	curOrg := orgId
@@ -485,7 +488,7 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 
 		generatedItem := item.(map[string]interface{})
 
-		idKeys := []string{"id", "uid", "uuid", "identifier", "key"}
+		idKeys := []string{"finding_uid", "uid", "uuid", "id", "identifier", "key"}
 		foundIdentifier := ""
 		foundIdentifierKey := ""
 		for _, idKey := range idKeys {
@@ -520,7 +523,7 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 		// Generate an ID if we didn't find one
 		if len(foundIdentifier) <= 4 {
 			if debug { 
-				log.Printf("[DEBUG] Failed finding VALID ID key in item for label %s: ID Key: %s, Value: %s", value.Label, foundIdentifierKey, foundIdentifier)
+				log.Printf("[DEBUG] Failed finding VALID ID key in item for label %s: ID Key: '%s', Value: '%s'", value.Label, foundIdentifierKey, foundIdentifier)
 			}
 
 			marshalledItem, err := json.Marshal(generatedItem)
@@ -629,9 +632,9 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 	// v0.2: Send /api/v1/orgs/{org_id}/datastore/upload request
 
 	// Bulk request instead (shuffle 2.1.0 optimisation)
-	err := sendDatastoreUploadRequest(ctx, allEntries, curApikey, curOrg, curBackend)
+	err := sendDatastoreUploadRequest(ctx, allEntries, curApikey, curExecutionId, curOrg, curBackend)
 	if err != nil {
-		log.Printf("[WARNING] Failed sending datastore request (3) for item in schemaless output for label %s: %s", value.Label, err)
+		//log.Printf("[ERROR] Failed sending datastore request (3) for item in schemaless output for label %s: %s", value.Label, err)
 	} else {
 		log.Printf("[INFO] Successfully stored %d items in schemaless/singul output for label %s in org %s", len(allEntries), value.Label, orgId)
 	}
@@ -1687,6 +1690,13 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 		}
 
+		if selectedApp.Name == "Shuffle_Datastore" {
+			if debug { 
+				log.Printf("[DEBUG] Failing over to NO AUTH for shuffle datastore")
+			}
+			requiresAuth = false
+		}
+
 		if !requiresAuth {
 			//log.Printf("\n\n[ERROR] App '%s' doesn't require auth\n\n", selectedApp.Name)
 		} else {
@@ -1788,7 +1798,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		return jsonFormatted, nil
 	}
 
-	if !standalone && !value.SkipWorkflow {
+	if !standalone && value.KeepWorkflow {
 		log.Printf("\n\n[INFO] SHOULD add workflow %s\n\n", parentWorkflow.ID)
 	}
 
@@ -2173,8 +2183,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 		}
 
-		// Handle it properly
-		if len(relevantValue) >= 4 {
+		// Handle it properly to force in missing data
+		if len(relevantValue) >= 2 {
 			found := false
 			for _, param := range secondAction.Parameters {
 				if strings.Contains(param.Value, relevantValue) {
@@ -2342,9 +2352,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
-	// Runs individual apps, one at a time
-	if value.SkipWorkflow {
-
+	// Runs individual apps, one at a time instead of building them as a workflow
+	if !value.KeepWorkflow {
 		if len(missingFields) > 0 && selectedAction.Name != "custom_action" {
 			log.Printf("[WARNING] Not all required fields were found in category action (2). Want: %#v in action %s", missingFields, selectedAction.Name)
 			//respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Not all required fields are set", "label": "%s", "missing_fields": "%s", "action": "%s", "api_debugger_url": "%s"}`, value.Label, strings.Join(missingFields, ","), selectedAction.Name, fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID)))
@@ -2899,6 +2908,15 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				baseUrl = strings.Join(baseurlSplit[0:3], "/")
 			}
 
+			if len(orgId) == 0 && len(user.ActiveOrg.Id) > 0 {
+				orgId = user.ActiveOrg.Id
+			}
+
+			// Map back to request apikey if nothing else is available 
+			if len(authorization) == 0 && len(user.ApiKey) > 0 {
+				authorization = user.ApiKey
+			}
+
 			// No shuffler.io config for standalone runs
 			authConfig := fmt.Sprintf("false,%s,%s,%s,%s", baseUrl, authorization, orgId, optionalExecutionId)
 			if standalone {
@@ -2961,9 +2979,21 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				// This is just to FORCE it to work and be locally testable
 				foundLabelSplit := strings.Split(value.Label, "_")
 
+				curExecutionId := "" 
 				curApikey := shuffleApiKey
 				curBackend := shuffleBackend
 				curOrg := shuffleOrg
+				if len(orgId) > 0 {
+					curOrg = user.ActiveOrg.Id
+				}
+
+				if len(authorization) > 0 { 
+					curApikey = authorization
+				}
+
+				if len(baseUrl) > 0 {
+					curBackend = baseUrl
+				}
 
 				// Can we do this within the context of the current request IF it was a request?
 				// For cloud/self-hosted Shuffle:
@@ -2986,8 +3016,13 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					// This is a hack to allow execution auth ((:
 					newExecutionId := request.URL.Query().Get("execution_id")
 					if len(newExecutionId) > 0 {
-						curOrg = fmt.Sprintf("execution:%s", newExecutionId)
+						curExecutionId = newExecutionId
 					}
+				}
+
+				// Fallback in case of execution auth instead of user auth
+				if len(curExecutionId) == 0 && len(optionalExecutionId) > 0 {
+					curExecutionId = optionalExecutionId
 				}
 
 				// Handles the actual uploading itself
@@ -2996,9 +3031,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						log.Printf("[DEBUG] Should upload Singul result for label '%s'", value.Label)
 					}
 
-					autoUploadSingulOutput(ctx, curOrg, curApikey, curBackend, parsedTranslation, value, secondAction)
+					autoUploadSingulOutput(ctx, curOrg, curApikey, curExecutionId, curBackend, parsedTranslation, value, secondAction)
 				} else {
-					log.Printf("\n\nNot uploading. Label: %#v\n\n", value.Label)
+					if debug { 
+						log.Printf("[DEBUG] Singul: NOT uploading. Label: %#v. LabelSplit: %#v. Org: %#v\n\n", value.Label, foundLabelSplit, curOrg)
+					}
 				}
 			}
 
@@ -3414,13 +3451,6 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 						originalActionName = fmt.Sprintf("get_%s", originalActionName)
 					}
 
-					//if debug { 
-					//	log.Printf("[DEBUG] %s & %s", originalActionName, parsedSummary)
-					//}
-					//if strings.Contains(originalActionName, "messages_get") && strings.Contains(parsedSummary, "messages_get") {
-						//os.Exit(3)
-					//}
-
 					// Find exact match
 					if originalActionName == parsedSummary {
 						if customActionParam.Name == "method" {
@@ -3552,6 +3582,11 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 						break
 					}
 				}
+			}
+
+			// Just in case, e.g. to stay away from auth
+			if customActionParam.Configuration { 
+				continue
 			}
 
 			if debug { 
@@ -3749,9 +3784,7 @@ func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
 	return value
 }
 
-func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.CacheKeyData, apikey, orgId, backendUrl string) error {
-
-
+func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.CacheKeyData, apikey, curExecutionId, orgId, backendUrl string) error {
 	// Send a request to /api/v1/orgs/{org_id}/set_cache
 	if !strings.HasPrefix(backendUrl, "http") {
 		backendUrl = os.Getenv("BASE_URL")
@@ -3766,7 +3799,6 @@ func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.Ca
 	}
 
 	url := fmt.Sprintf("%s/api/v2/datastore?bulk=true", backendUrl)
-
 	reqBody, err := json.Marshal(datastoreEntry)
 	if err != nil {
 		log.Printf("[ERROR] Failed marshalling cache item before send: %s", err)
@@ -3774,12 +3806,12 @@ func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.Ca
 	}
 
 	// Execution auth workaround
-	if strings.HasPrefix(orgId, "execution:") {
-		executionId := strings.TrimPrefix(orgId, "execution:")
-		url += fmt.Sprintf("%s&execution_id=%s&authorization=%s", url, executionId, apikey)
-
-		orgId = ""
-		apikey = ""
+	if len(curExecutionId) > 0 { 
+		//executionId := strings.TrimPrefix(orgId, "execution:")
+		url = fmt.Sprintf("%s&execution_id=%s&authorization=%s", url, curExecutionId, apikey)
+	} else if len(apikey) > 0 {
+	} else {
+		log.Printf("[ERROR] No auth found for sendDatastoreUploadRequest in org %s", orgId)
 	}
 
 	// May need a fixed client here
@@ -3808,8 +3840,8 @@ func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.Ca
 	}
 
 	if res.StatusCode != 200 {
-		log.Printf("[ERROR] Failed sending datastore request: %s. Status code: %d. Body: %s", err, res.StatusCode, string(body))
-		return errors.New(fmt.Sprintf("Failed sending datastore request (2): %s. Status code: %d. Body: %s", err, res.StatusCode, string(body)))
+		log.Printf("[ERROR] Failed sending datastore request (4): %s. Status code: %d. URL: %#v, Resp: %s", err, res.StatusCode, url, string(body))
+		return errors.New(fmt.Sprintf("Failed sending datastore request (4-2): %s. Status code: %d. Body: %s", err, res.StatusCode, string(body)))
 	}
 
 	//log.Printf("[DEBUG] Successfully sent datastore request for %d items
