@@ -16,13 +16,14 @@ import (
 
 	"net/url"
 	"os"
-	"os/exec"
 	"sort"
-	"strings"
+	"os/exec"
 	"time"
+	"strings"
 	"path/filepath"
 
 	uuid "github.com/satori/go.uuid"
+	"github.com/andybalholm/brotli"
 
 	"github.com/frikky/schemaless"
 	"github.com/shuffle/shuffle-shared"
@@ -369,10 +370,12 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 			log.Printf("[ERROR] Singul - Failed unmarshaling schemaless output PRE datastore upload: %s", err)
 		} else {
 			// This is a hack to allow execution auth ((:
+			curExecutionId := ""
 			curOrg := user.ActiveOrg.Id
 			newExecutionId := request.URL.Query().Get("execution_id")
 			if len(newExecutionId) > 0 {
-				curOrg = fmt.Sprintf("execution:%s", newExecutionId)
+				//curOrg = fmt.Sprintf("execution:%s", newExecutionId)
+				curExecutionId = newExecutionId
 			}
 
 			log.Printf("\n\n\nSINGUL UPLOAD - %#v (2)\n\n\n", parsedTranslation)
@@ -380,6 +383,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 				ctx, 
 				curOrg, 
 				authorization, 
+				curExecutionId,
 				baseUrl, 
 				parsedTranslation, 
 				value, 
@@ -399,7 +403,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 // Was made for a... weird format, so we are just continuing to use that
 	
 // orgId is SOMETIMES mapped to executionId in cases for execution auth
-func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string, curBackend string, parsedTranslation shuffle.SchemalessOutput, value shuffle.CategoryAction, secondAction shuffle.Action) {
+func autoUploadSingulOutput(ctx context.Context, orgId, curApikey, curExecutionId, curBackend string, parsedTranslation shuffle.SchemalessOutput, value shuffle.CategoryAction, secondAction shuffle.Action) {
 	// Seems to work when authorization (curApikey) is NOT execution based
 
 	curOrg := orgId
@@ -409,186 +413,235 @@ func autoUploadSingulOutput(ctx context.Context, orgId string, curApikey string,
 		value.AppName = secondAction.AppName
 	}
 
+	foundArray := []interface{}{}
+	if innerArray, ok := parsedTranslation.Output.([]interface{}); ok {
+		foundArray = innerArray 
+	} else if innerMap, ok := parsedTranslation.Output.(map[string]interface{}); ok {
+		foundArray = append(foundArray, innerMap)
+	}
+
+	//if debug { 
+	//	log.Printf("\n\n\nAUTO UPLOAD FUNCTION: EXIT ON PURPOSE TO LOOK FOR GMAIL -> '%s'. Data type: %#v\n\nTYPE: %#v\n\n\n", value.Label, parsedTranslation.Output, reflect.TypeOf(parsedTranslation.Output))
+	//}
+
+	isListRequest := false
+
 	// .Output = translated
 	// .RawResponse = original (raw)
-	if foundArray, ok := parsedTranslation.Output.([]interface{}); ok {
-		log.Printf("[DEBUG] Found list/search output for label '%s'. Array Length: %d", value.Label, len(foundArray))
+	//if foundArray, ok := parsedTranslation.Output.([]interface{}); ok {
+	if debug { 
+		log.Printf("[DEBUG] Found get/list/search output for label '%s' during upload. Array Length: %d", value.Label, len(foundArray))
+	}
 
-		actualLabel := strings.ToLower(strings.Join(foundLabelSplit[1:], "_"))
-		if len(actualLabel) == 0 {
-			actualLabel = strings.ToLower(strings.ReplaceAll(value.Label, " ", "_"))
+	actualLabel := strings.ToLower(strings.Join(foundLabelSplit[1:], "_"))
+	if len(actualLabel) == 0 {
+		actualLabel = strings.ToLower(strings.ReplaceAll(value.Label, " ", "_"))
 
-			// FIXME: This may not be necessary, but is necessary for now to map to correct standard while upholding the category format
-			// This primarily happens during direct translations anyway
-			// list_tickets -> tickets
-			// ticket -> ticket
+		// FIXME: This may not be necessary, but is necessary for now to map to correct standard while upholding the category format
+		// This primarily happens during direct translations anyway
+		// list_tickets -> tickets
+		// ticket -> ticket
 
-			// Since they're different, we're just appending an 's' to make sure
-			// multiples are handlet correctly while pointing back to a label
-			// Remove this to have "normal" labels
-			if actualLabel == "ticket" || actualLabel == "user" || actualLabel == "asset" || actualLabel == "contact" || actualLabel == "alert" || actualLabel == "case" || actualLabel == "event" || actualLabel == "domain" || actualLabel == "ip" || actualLabel == "url" || actualLabel == "file" {
-				actualLabel = fmt.Sprintf("%ss", actualLabel)
-			}
+		// Since they're different, we're just appending an 's' to make sure
+		// multiples are handlet correctly while pointing back to a label
+		// Remove this to have "normal" labels
+		if actualLabel == "ticket" || actualLabel == "user" || actualLabel == "asset" || actualLabel == "contact" || actualLabel == "alert" || actualLabel == "case" || actualLabel == "event" || actualLabel == "domain" || actualLabel == "ip" || actualLabel == "url" || actualLabel == "file" {
+			actualLabel = fmt.Sprintf("%ss", actualLabel)
+			isListRequest = true
+		}
+	}
+
+	// Avoids isListRequest override
+	if actualLabel == "ticket" || actualLabel == "user" || actualLabel == "asset" || actualLabel == "contact" || actualLabel == "alert" || actualLabel == "case" || actualLabel == "event" || actualLabel == "domain" || actualLabel == "ip" || actualLabel == "url" || actualLabel == "file" {
+		actualLabel = fmt.Sprintf("%ss", actualLabel)
+	}
+
+	if strings.HasPrefix(actualLabel, "get_") {
+		actualLabel = strings.TrimPrefix(actualLabel, "get_")
+	} else if strings.HasPrefix(actualLabel, "list_") {
+		actualLabel = strings.TrimPrefix(actualLabel, "list_")
+	} else if strings.HasPrefix(actualLabel, "search_") {
+		actualLabel = strings.TrimPrefix(actualLabel, "search_")
+	}
+
+	if actualLabel == "tickets" || actualLabel == "alerts" || actualLabel == "cases" || actualLabel == "messages" || actualLabel == "chats" || actualLabel == "incidents" {
+		actualLabel = "shuffle-security_incidents"
+	}
+
+	if actualLabel == "assets" || actualLabel == "endpoints" {
+		actualLabel = "shuffle-security_assets"
+	}
+
+	if actualLabel == "users" {
+		actualLabel = "shuffle-security_users"
+	}
+
+	allEntries := []shuffle.CacheKeyData{}
+
+	// Goroutine BUT wait on the end
+	for cnt, item := range foundArray {
+		// Check if uid, uuid, id or similar is a valid key
+		if _, ok := item.(map[string]interface{}); !ok {
+			log.Printf("[ERROR] Item in Singul list output for label %s is not a map: %#v", value.Label, item)
+			continue
 		}
 
-		if actualLabel == "tickets" || actualLabel == "alerts" || actualLabel == "cases" {
-			actualLabel = "shuffle-security incidents"
-		}
+		generatedItem := item.(map[string]interface{})
 
-		if actualLabel == "assets" {
-			actualLabel = "shuffle-security assets"
-		}
+		idKeys := []string{"finding_uid", "uid", "uuid", "id", "identifier", "key"}
+		foundIdentifier := ""
+		foundIdentifierKey := ""
+		for _, idKey := range idKeys {
+			// Check if lower case exists
+			for key, mapValue := range generatedItem {
+				if strings.ToLower(key) != idKey {
 
-		if actualLabel == "users" {
-			actualLabel = "shuffle-security users"
-		}
-
-		allEntries := []shuffle.CacheKeyData{}
-
-		// Goroutine BUT wait on the end
-		for cnt, item := range foundArray {
-			// Check if uid, uuid, id or similar is a valid key
-			if _, ok := item.(map[string]interface{}); !ok {
-				log.Printf("[ERROR] Item in Singul list output for label %s is not a map: %#v", value.Label, item)
-				continue
-			}
-
-			generatedItem := item.(map[string]interface{})
-
-			idKeys := []string{"id", "uid", "uuid", "identifier", "key"}
-			foundIdentifier := ""
-			foundIdentifierKey := ""
-			for _, idKey := range idKeys {
-				// Check if lower case exists
-				for key, mapValue := range generatedItem {
-					if strings.ToLower(key) != idKey {
-
-						// Fallback for id/uid etc.
-						if idKey != "id" && strings.Contains(key, idKey) && len(fmt.Sprintf("%v", mapValue)) < 100 && len(fmt.Sprintf("%v", mapValue)) > 4 {
-							foundIdentifier = fmt.Sprintf("%v", mapValue)
-							foundIdentifierKey = key
-						}
-
-						continue
-					}
-
-					// Found the key, set it as the actual label
-					if val, ok := mapValue.(string); ok {
-						foundIdentifier = val
+					// Fallback for id/uid etc.
+					if idKey != "id" && strings.Contains(key, idKey) && len(fmt.Sprintf("%v", mapValue)) < 100 && len(fmt.Sprintf("%v", mapValue)) > 4 {
+						foundIdentifier = fmt.Sprintf("%v", mapValue)
 						foundIdentifierKey = key
-						break
-					} else {
-						log.Printf("[ERROR] Failed finding ID key in item for label %s: %s", value.Label, mapValue)
 					}
+
+					continue
 				}
 
-				if foundIdentifier != "" && len(foundIdentifier) > 4 {
-					break
-				}
-			}
-
-			// Generate an ID if we didn't find one
-			if len(foundIdentifier) <= 4 {
-				if debug { 
-					log.Printf("[DEBUG] Failed finding VALID ID key in item for label %s: %#v. ID Key: %s, Value: %s", value.Label, item, foundIdentifierKey, foundIdentifier)
-				}
-
-				marshalledItem, err := json.Marshal(generatedItem)
-				if err != nil {
-					log.Printf("[ERROR] Failed marshalling item in schemaless output for label %s: %s", value.Label, err)
+				// Found the key, set it as the actual label
+				if val, ok := mapValue.(string); ok {
+					foundIdentifier = val
+					foundIdentifierKey = key
 					break
 				} else {
-					foundIdentifier = fmt.Sprintf("%x", md5.Sum(marshalledItem))
+					log.Printf("[ERROR] Failed finding ID key in item for label %s: %s", value.Label, mapValue)
 				}
 			}
 
-			// In case it finds some weird thingy
-			if len(foundIdentifier) > 36 {
-				// md5 sum it
-				foundIdentifier = fmt.Sprintf("%x", md5.Sum([]byte(foundIdentifier)))
-			}
-
-			// Overrides the key that is being ingested
-			if len(foundIdentifierKey) > 0 && len(foundIdentifier) > 0 {
-				generatedItem[foundIdentifierKey] = foundIdentifier
-			}
-
-			// hardcoded override for product name. Just a test.
-			if len(value.AppName) > 0 {
-				generatedItem["shuffle_source"] = strings.ToLower(value.AppName)
-
-				if sourceVal, ok := generatedItem["source"]; ok {
-					if _, ok := sourceVal.(string); ok {
-						generatedItem["source"] = strings.ToLower(value.AppName)
-					}
-				} 
-
-				if sourceVal, ok := generatedItem["product"]; ok {
-					if _, ok := sourceVal.(string); ok {
-						generatedItem["product"] = strings.ToLower(value.AppName)
-					} else if sourceMap, ok := sourceVal.(map[string]interface{}); ok {
-						if nameVal, ok := sourceMap["name"]; ok {
-							if _, ok := nameVal.(string); ok {
-								sourceMap["name"] = strings.ToLower(value.AppName)
-							}
-						}
-
-						generatedItem["product"] = sourceMap
-					}
-				}
-			}
-
-			// Provide a short triage plan for the incident in english and update it in the internal shuffle datastore with the same key and category 'shuffle-security_incidents'.   Make sure it is JSON formatted like {"tasks": []} so that we can inject it in existing data. Some incidents are duds and should be closed quickly. Others are important ones. Others are missing important details. Use the following format for each task, and ONLY update the relevant fields: [{"assignee": "AI Agent", "title": "Title of the task", "category": "triage/containment/recovery/communication/documentation", "completed": false, "createdBy": "ai-agent@shuffler.io"}]. ONLY output as JSON and nothing more.   If the incident has RELEVANT tasks, add to them if necessary. When done, ALWAYS make sure the "status" is inProgress.
-			// Go through each task one by one if there are any. When starting them, self-assign yourself to make it clear you are working on it. Go in the order of incident response relevance, which is typically in order. If a task is irrelevant, set "disabled": true as a value for it.  Before starting, get "agent_permissions" from "shuffle-security_configuration". This has a list of permissions you NEED to follow. This extends the reach of tools and capabilities you are allowed to use. ONLY use the permissions that are enabled. 
-
-			// Check if we have already uploaded it recently based on identifier
-			cacheKey := fmt.Sprintf("singul_%s_%s", orgId, foundIdentifier)
-			_, err := shuffle.GetCache(ctx, cacheKey)
-			if err == nil {
-				if debug { 
-					log.Printf("[DEBUG] Found item in cache for label %s in org %s", foundIdentifier, orgId)
-				}
-
-				// We already have it, skip
-				continue
-			}
-
-			shuffle.SetCache(ctx, cacheKey, []byte("true"), 60*60*24*3) // 3 days
-
-			//marshalledBody, err := json.Marshal(item)
-			marshalledBody, err := json.Marshal(generatedItem)
-			if err != nil {
-				log.Printf("[ERROR] Failed marshalling item in schemaless output for label %s: %s", value.Label, err)
-				continue
-			}
-
-			datastoreEntry := shuffle.CacheKeyData{
-				Key: foundIdentifier,
-				Value: string(marshalledBody),
-				Category: actualLabel,
-			}
-		
-			allEntries = append(allEntries, datastoreEntry)
-
-			if cnt > 100 {
+			if foundIdentifier != "" && len(foundIdentifier) > 4 {
 				break
 			}
 		}
 
-		// v0.1: Send /api/v1/orgs/{org_id}/set_cache requrest
-		// v0.2: Send /api/v1/orgs/{org_id}/datastore/upload request
+		// Generate an ID if we didn't find one
+		if len(foundIdentifier) <= 4 {
+			if debug { 
+				log.Printf("[DEBUG] Failed finding VALID ID key in item for label %s: ID Key: '%s', Value: '%s'", value.Label, foundIdentifierKey, foundIdentifier)
+			}
 
-		// Bulk request instead (shuffle 2.1.0 optimisation)
-		err := sendDatastoreUploadRequest(ctx, allEntries, curApikey, curOrg, curBackend)
-		if err != nil {
-			log.Printf("[WARNING] Failed sending datastore request (3) for item in schemaless output for label %s: %s", value.Label, err)
-		} else {
-			log.Printf("[INFO] Successfully stored %d items in schemaless/singul output for label %s in org %s", len(allEntries), value.Label, orgId)
+			marshalledItem, err := json.Marshal(generatedItem)
+			if err != nil {
+				log.Printf("[ERROR] Failed marshalling item in schemaless output for label %s: %s", value.Label, err)
+				break
+			} else {
+				foundIdentifier = fmt.Sprintf("%x", md5.Sum(marshalledItem))
+			}
 		}
 
-	} else {
-		log.Printf("[ERROR] Singul output for label %s is not an array: %#v", value.Label, parsedTranslation.Output)
+		// In case it finds some weird thingy
+		if len(foundIdentifier) > 36 {
+			// md5 sum it
+			foundIdentifier = fmt.Sprintf("%x", md5.Sum([]byte(foundIdentifier)))
+		}
+
+		// Overrides the key that is being ingested
+		if len(foundIdentifierKey) > 0 && len(foundIdentifier) > 0 {
+			generatedItem[foundIdentifierKey] = foundIdentifier
+		}
+
+		if isListRequest { 
+			foundFields := []string{}
+			for field, generatedItemValue := range generatedItem {
+				if stringVal, ok := generatedItemValue .(string); ok {
+					if len(stringVal) > 0 {
+						foundFields = append(foundFields, field)
+					}
+				}
+			}
+
+			log.Printf("[DEBUG] List request for label %s. Found identifier: %s. Found fields: %#v", value.Label, foundIdentifier, foundFields)
+		}
+
+		// hardcoded override for product name. Just a test.
+		if len(value.AppName) > 0 {
+			generatedItem["shuffle_source"] = strings.ToLower(value.AppName)
+
+			if sourceVal, ok := generatedItem["source"]; ok {
+				if _, ok := sourceVal.(string); ok {
+					generatedItem["source"] = strings.ToLower(value.AppName)
+				}
+			} 
+
+			if sourceVal, ok := generatedItem["product"]; ok {
+				if _, ok := sourceVal.(string); ok {
+					generatedItem["product"] = strings.ToLower(value.AppName)
+				} else if sourceMap, ok := sourceVal.(map[string]interface{}); ok {
+					if nameVal, ok := sourceMap["name"]; ok {
+						if _, ok := nameVal.(string); ok {
+							sourceMap["name"] = strings.ToLower(value.AppName)
+						}
+					}
+
+					generatedItem["product"] = sourceMap
+				}
+			}
+		}
+
+		// Provide a short triage plan for the incident in english and update it in the internal shuffle datastore with the same key and category 'shuffle-security_incidents'.   Make sure it is JSON formatted like {"tasks": []} so that we can inject it in existing data. Some incidents are duds and should be closed quickly. Others are important ones. Others are missing important details. Use the following format for each task, and ONLY update the relevant fields: [{"assignee": "AI Agent", "title": "Title of the task", "category": "triage/containment/recovery/communication/documentation", "completed": false, "createdBy": "ai-agent@shuffler.io"}]. ONLY output as JSON and nothing more.   If the incident has RELEVANT tasks, add to them if necessary. When done, ALWAYS make sure the "status" is inProgress.
+		// Go through each task one by one if there are any. When starting them, self-assign yourself to make it clear you are working on it. Go in the order of incident response relevance, which is typically in order. If a task is irrelevant, set "disabled": true as a value for it.  Before starting, get "agent_permissions" from "shuffle-security_configuration". This has a list of permissions you NEED to follow. This extends the reach of tools and capabilities you are allowed to use. ONLY use the permissions that are enabled. 
+
+		// Check if we have already uploaded it recently based on identifier
+		cacheKey := fmt.Sprintf("singul_%s_%s", orgId, foundIdentifier)
+		_, err := shuffle.GetCache(ctx, cacheKey)
+		if err == nil {
+			if debug { 
+				log.Printf("[DEBUG] Found item in cache for label %s in org %s", foundIdentifier, orgId)
+			}
+
+			// We already have it, skip
+
+			if !strings.HasPrefix(value.Label, "get_") {
+				continue
+			} else {
+				log.Printf("[DEBUG] Skipping cache for get_")
+			}
+		}
+
+		shuffle.SetCache(ctx, cacheKey, []byte("true"), 60*60*24*3) // 3 days as we don't want to keep running the same one over and over.
+
+		marshalledBody, err := json.Marshal(generatedItem)
+		if err != nil {
+			log.Printf("[ERROR] Failed marshalling item in schemaless output for label %s: %s", value.Label, err)
+			continue
+		}
+
+		//if debug { 
+		//	log.Printf("[DEBUG] Uploading '%s' in category '%s' with data %s", foundIdentifier, actualLabel, string(marshalledBody))
+		//}
+
+		datastoreEntry := shuffle.CacheKeyData{
+			Key: foundIdentifier,
+			Value: string(marshalledBody),
+			Category: actualLabel,
+		}
+	
+		allEntries = append(allEntries, datastoreEntry)
+		if cnt > 100 {
+			break
+		}
 	}
+
+	// v0.1: Send /api/v1/orgs/{org_id}/set_cache requrest
+	// v0.2: Send /api/v1/orgs/{org_id}/datastore/upload request
+
+	// Bulk request instead (shuffle 2.1.0 optimisation)
+	err := sendDatastoreUploadRequest(ctx, allEntries, curApikey, curExecutionId, curOrg, curBackend)
+	if err != nil {
+		//log.Printf("[ERROR] Failed sending datastore request (3) for item in schemaless output for label %s: %s", value.Label, err)
+	} else {
+		log.Printf("[INFO] Successfully stored %d items in schemaless/singul output for label %s in org %s", len(allEntries), value.Label, orgId)
+	}
+
+	//} else {
+	//	log.Printf("[ERROR] Singul output for label %s is not an array: %#v", value.Label, parsedTranslation.Output)
+	//}
 
 	log.Printf("\n\n\n")
 }
@@ -1637,6 +1690,13 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 		}
 
+		if selectedApp.Name == "Shuffle_Datastore" {
+			if debug { 
+				log.Printf("[DEBUG] Failing over to NO AUTH for shuffle datastore")
+			}
+			requiresAuth = false
+		}
+
 		if !requiresAuth {
 			//log.Printf("\n\n[ERROR] App '%s' doesn't require auth\n\n", selectedApp.Name)
 		} else {
@@ -1738,7 +1798,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		return jsonFormatted, nil
 	}
 
-	if !standalone && !value.SkipWorkflow {
+	if !standalone && value.KeepWorkflow {
 		log.Printf("\n\n[INFO] SHOULD add workflow %s\n\n", parentWorkflow.ID)
 	}
 
@@ -1948,12 +2008,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				missingFields = append(missingFields, field.Key)
 			}
 		}
-
-		/*
-		if debug { 
-			log.Printf("[DEBUG] Not all required fields were handled (1). Missing: %#v. Should force use of all fields? Handled fields: %3v", missingFields, handledRequiredFields)
-		}
-		*/
 	}
 
 	// Send request to /api/v1/conversation with this data
@@ -2133,6 +2187,38 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
+	// Arbitrary lookup of field value in other fields as it may have been
+	// replaced already
+	newMissingFields := []string{}
+	for _, missingField := range missingFields {
+		relevantValue := ""
+		for _, field := range value.Fields {
+			if field.Key == missingField {
+				relevantValue = field.Value
+				break
+			}
+		}
+
+		// Handle it properly to force in missing data
+		if len(relevantValue) >= 2 {
+			found := false
+			for _, param := range secondAction.Parameters {
+				if strings.Contains(param.Value, relevantValue) {
+					found = true 
+					break
+				}
+			}
+
+			if found { 
+				continue
+			}
+		}
+
+		newMissingFields = append(newMissingFields, missingField)
+	}
+
+	missingFields = newMissingFields
+
 	// AI fallback mechanism to handle missing fields
 	// This is in case some fields are not sent in properly
 	orgId := ""
@@ -2209,7 +2295,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//func RunSelfCorrectingRequest(originalFields []Valuereplace, action Action, status int, additionalInfo, fullUrl, outputBody, appname, inputdata string, attempt ...int) (Action, string, error) {
 
 			if err != nil {
-				log.Printf("[ERROR] Failed running self-correcting request for custom action: %s", err)
+				log.Printf("[ERROR] Failed running self-correcting request for custom_action: %s", err)
+
+				// :thinking: => This was added March 2026 to refix custom action mapping
+				newOutputAction.Name = "custom_action"
+				secondAction = newOutputAction
 			} else {
 				newOutputAction.Name = "custom_action"
 				secondAction = newOutputAction
@@ -2270,15 +2360,16 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		}
 	}
 
+	// This may screw us over e.g. for xml, but autocorrect should solve it 
+	// over time
 	for paramIndex, param := range secondAction.Parameters {
 		if param.Name == "headers" && len(param.Value) == 0 {
 			secondAction.Parameters[paramIndex].Value = "Content-Type: application/json"
 		}
 	}
 
-	// Runs individual apps, one at a time
-	if value.SkipWorkflow {
-
+	// Runs individual apps, one at a time instead of building them as a workflow
+	if !value.KeepWorkflow {
 		if len(missingFields) > 0 && selectedAction.Name != "custom_action" {
 			log.Printf("[WARNING] Not all required fields were found in category action (2). Want: %#v in action %s", missingFields, selectedAction.Name)
 			//respBody = []byte(fmt.Sprintf(`{"success": false, "reason": "Not all required fields are set", "label": "%s", "missing_fields": "%s", "action": "%s", "api_debugger_url": "%s"}`, value.Label, strings.Join(missingFields, ","), selectedAction.Name, fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID)))
@@ -2544,6 +2635,13 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 							apprunBody = decompressed
 						}
 					}
+				} else if strings.EqualFold(newresp.Header.Get("Content-Encoding"), "br") {
+					r := brotli.NewReader(bytes.NewReader(apprunBody))
+					decoded, err := io.ReadAll(r)
+					if err == nil {
+						apprunBody = decoded
+					}
+
 				}
 			}
 
@@ -2826,6 +2924,15 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				baseUrl = strings.Join(baseurlSplit[0:3], "/")
 			}
 
+			if len(orgId) == 0 && len(user.ActiveOrg.Id) > 0 {
+				orgId = user.ActiveOrg.Id
+			}
+
+			// Map back to request apikey if nothing else is available 
+			if len(authorization) == 0 && len(user.ApiKey) > 0 {
+				authorization = user.ApiKey
+			}
+
 			// No shuffler.io config for standalone runs
 			authConfig := fmt.Sprintf("false,%s,%s,%s,%s", baseUrl, authorization, orgId, optionalExecutionId)
 			if standalone {
@@ -2835,6 +2942,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			outputmap := make(map[string]interface{})
 			schemalessOutput, err := schemaless.Translate(ctx, value.Label, marshalledBody, authConfig)
 			if err != nil {
+				log.Printf("[ERROR] Schemaless failure for label '%s' in org '%s'", value.Label, orgId)
 
 				if value.AppName == "HTTP" || value.App == "HTTP" {
 					parsedTranslation.Success = true
@@ -2852,6 +2960,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					}
 				*/
 			} else {
+				if debug {
+					log.Printf("[DEBUG] In schemaless success pre upload.")
+				}
+
 				parsedTranslation.Success = true
 				//parsedTranslation.RawOutput = string(schemalessOutput)
 
@@ -2883,9 +2995,21 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				// This is just to FORCE it to work and be locally testable
 				foundLabelSplit := strings.Split(value.Label, "_")
 
+				curExecutionId := "" 
 				curApikey := shuffleApiKey
 				curBackend := shuffleBackend
 				curOrg := shuffleOrg
+				if len(orgId) > 0 {
+					curOrg = user.ActiveOrg.Id
+				}
+
+				if len(authorization) > 0 { 
+					curApikey = authorization
+				}
+
+				if len(baseUrl) > 0 {
+					curBackend = baseUrl
+				}
 
 				// Can we do this within the context of the current request IF it was a request?
 				// For cloud/self-hosted Shuffle:
@@ -2908,13 +3032,26 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					// This is a hack to allow execution auth ((:
 					newExecutionId := request.URL.Query().Get("execution_id")
 					if len(newExecutionId) > 0 {
-						curOrg = fmt.Sprintf("execution:%s", newExecutionId)
+						curExecutionId = newExecutionId
 					}
 				}
 
+				// Fallback in case of execution auth instead of user auth
+				if len(curExecutionId) == 0 && len(optionalExecutionId) > 0 {
+					curExecutionId = optionalExecutionId
+				}
+
 				// Handles the actual uploading itself
-				if len(foundLabelSplit) > 1 && (strings.HasPrefix(value.Label, "list_") || strings.HasPrefix(value.Label, "search_")) && len(curApikey) > 0 && len(curOrg) > 0 {
-					autoUploadSingulOutput(ctx, curOrg, curApikey, curBackend, parsedTranslation, value, secondAction)
+				if len(foundLabelSplit) > 1 && (strings.HasPrefix(value.Label, "list_") || strings.HasPrefix(value.Label, "get_") || strings.HasPrefix(value.Label, "search_")) && len(curApikey) > 0 && len(curOrg) > 0 {
+					if debug { 
+						log.Printf("[DEBUG] Should upload Singul result for label '%s'", value.Label)
+					}
+
+					autoUploadSingulOutput(ctx, curOrg, curApikey, curExecutionId, curBackend, parsedTranslation, value, secondAction)
+				} else {
+					if debug { 
+						log.Printf("[DEBUG] Singul: NOT uploading. Label: %#v. LabelSplit: %#v. Org: %#v\n\n", value.Label, foundLabelSplit, curOrg)
+					}
 				}
 			}
 
@@ -2924,11 +3061,11 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//}
 
 			parsedTranslation.Retries = i + 1
-
 			if len(foundName) > 0 {
 				log.Printf("[DEBUG] Reverse lookup SUCCESS! Name: '%s', Labels: %v", foundName, foundLabels)
 				parsedTranslation.ActionName = foundName
 			}
+
 			if len(foundLabels) > 0 {
 				parsedTranslation.CategoryLabels = foundLabels
 			}
@@ -3104,7 +3241,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	executionArgument := ""
 	execData := shuffle.ExecutionStruct{
 		Start:             startId,
-		ExecutionSource:   "ShuffleGPT",
+		ExecutionSource:   "Singul",
 		ExecutionArgument: executionArgument,
 	}
 
@@ -3221,6 +3358,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 // Translates and action IF custom_action is available
 // Uses OpenAPI spec to do so
 func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowAppAction) shuffle.WorkflowAppAction {
+
 	if app.ID == "" || app.Name == "" {
 		return action
 	}
@@ -3236,6 +3374,8 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 	}
 
 	originalActionName := action.Name
+
+	// Non-changing example that can be used for reference
 
 	_, openapiSpec, err := shuffle.GetAppSingul(basepath, action.AppName) 
 	if err != nil || openapiSpec == nil || openapiSpec.Info == nil || openapiSpec.Info.Title == "" {
@@ -3282,8 +3422,11 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 		action.Parameters = newParams
 	}
 
+	sourceActionName := originalActionName 
 	originalActionNameFound := false
 	for _, customActionParam := range app.Actions[customActionIndex].Parameters {
+		originalActionName = sourceActionName
+
 		found := false
 		for _, param := range action.Parameters {
 			if param.Name == customActionParam.Name {
@@ -3308,13 +3451,24 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 
 		if !found {
 			for path, methodData := range openapiSpec.Paths {
+				originalActionName = sourceActionName
+
 				if methodData.Get != nil {
 					parsedSummary := fmt.Sprintf("get_%s", strings.ReplaceAll(strings.ToLower(methodData.Get.Summary), " ", "_"))
 					if strings.HasPrefix(parsedSummary, "get_get_") {
 						parsedSummary = strings.TrimPrefix(parsedSummary, "get_")
 					}
 
-					if strings.Contains(originalActionName, parsedSummary) {
+					if !strings.HasPrefix(parsedSummary, "get_") {
+						parsedSummary = fmt.Sprintf("get_%s", parsedSummary)
+					}
+
+					if !strings.HasPrefix(originalActionName, "get_") {
+						originalActionName = fmt.Sprintf("get_%s", originalActionName)
+					}
+
+					// Find exact match
+					if originalActionName == parsedSummary {
 						if customActionParam.Name == "method" {
 							customActionParam.Value = "GET"
 						}
@@ -3324,7 +3478,6 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 						}
 	
 						originalActionNameFound = true
-
 						break
 					}
 				}
@@ -3335,7 +3488,16 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 						parsedSummary = strings.TrimPrefix(parsedSummary, "post_")
 					}
 
-					if strings.Contains(originalActionName, parsedSummary) {
+					if !strings.HasPrefix(parsedSummary, "post_") {
+						parsedSummary = fmt.Sprintf("post_%s", parsedSummary)
+					}
+
+					if !strings.HasPrefix(originalActionName, "post_") {
+						originalActionName = fmt.Sprintf("post_%s", originalActionName)
+					}
+
+					// Find exact match
+					if originalActionName == parsedSummary {
 						if customActionParam.Name == "method" {
 							customActionParam.Value = "POST"
 						}
@@ -3356,7 +3518,15 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 						parsedSummary = strings.TrimPrefix(parsedSummary, "patch_")
 					}
 
-					if strings.Contains(originalActionName, parsedSummary) {
+					if !strings.HasPrefix(parsedSummary, "patch_") {
+						parsedSummary = fmt.Sprintf("patch_%s", parsedSummary)
+					}
+
+					if !strings.HasPrefix(originalActionName, "patch_") {
+						originalActionName = fmt.Sprintf("patch_%s", originalActionName)
+					}
+
+					if originalActionName == parsedSummary {
 						if customActionParam.Name == "method" {
 							customActionParam.Value = "PATCH"
 						}
@@ -3377,7 +3547,15 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 						parsedSummary = strings.TrimPrefix(parsedSummary, "delete_")
 					}
 
-					if strings.Contains(originalActionName, parsedSummary) {
+					if !strings.HasPrefix(parsedSummary, "delete_") {
+						parsedSummary = fmt.Sprintf("delete_%s", parsedSummary)
+					}
+
+					if !strings.HasPrefix(originalActionName, "delete_") {
+						originalActionName = fmt.Sprintf("delete_%s", originalActionName)
+					}
+
+					if originalActionName == parsedSummary {
 						if customActionParam.Name == "method" {
 							customActionParam.Value = "DELETE"
 						}
@@ -3398,7 +3576,15 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 						parsedSummary = strings.TrimPrefix(parsedSummary, "put_")
 					}
 
-					if strings.Contains(originalActionName, parsedSummary) {
+					if !strings.HasPrefix(parsedSummary, "put_") {
+						parsedSummary = fmt.Sprintf("put_%s", parsedSummary)
+					}
+
+					if !strings.HasPrefix(originalActionName, "put_") {
+						originalActionName = fmt.Sprintf("put_%s", originalActionName)
+					}
+
+					if originalActionName == parsedSummary {
 						if customActionParam.Name == "method" {
 							customActionParam.Value = "PUT"
 						}
@@ -3414,6 +3600,11 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 				}
 			}
 
+			// Just in case, e.g. to stay away from auth
+			if customActionParam.Configuration { 
+				continue
+			}
+
 			if debug { 
 				log.Printf("[DEBUG] Appending '%s' with value %#v (%s => custom_action)", customActionParam.Name, customActionParam.Value, originalActionName)
 			}
@@ -3421,9 +3612,10 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 			//customActionParam.Value = path
 			customActionParam.Example = customActionParam.Value
 			action.Parameters = append(action.Parameters, customActionParam)
-
 		}
 	}
+
+	originalActionName = sourceActionName
 
 	queriesIndex := -1
 	bodyIndex := -1
@@ -3431,7 +3623,7 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 	for paramIndex, param := range action.Parameters {
 		if param.Name == "method" {
 			if param.Value == "" {
-				log.Printf("[ERROR] Failed to map method for original action name '%s' to custom_action parameters. Returning original action.", originalActionName)
+				log.Printf("[ERROR] Failed to map method for original action name '%s' to custom_action parameters. Returning original action.", sourceActionName)
 			}
 
 			if param.Value == "GET" { 
@@ -3626,9 +3818,7 @@ func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
 	return value
 }
 
-func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.CacheKeyData, apikey, orgId, backendUrl string) error {
-
-
+func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.CacheKeyData, apikey, curExecutionId, orgId, backendUrl string) error {
 	// Send a request to /api/v1/orgs/{org_id}/set_cache
 	if !strings.HasPrefix(backendUrl, "http") {
 		backendUrl = os.Getenv("BASE_URL")
@@ -3643,7 +3833,6 @@ func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.Ca
 	}
 
 	url := fmt.Sprintf("%s/api/v2/datastore?bulk=true", backendUrl)
-
 	reqBody, err := json.Marshal(datastoreEntry)
 	if err != nil {
 		log.Printf("[ERROR] Failed marshalling cache item before send: %s", err)
@@ -3651,12 +3840,12 @@ func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.Ca
 	}
 
 	// Execution auth workaround
-	if strings.HasPrefix(orgId, "execution:") {
-		executionId := strings.TrimPrefix(orgId, "execution:")
-		url += fmt.Sprintf("%s&execution_id=%s&authorization=%s", url, executionId, apikey)
-
-		orgId = ""
-		apikey = ""
+	if len(curExecutionId) > 0 { 
+		//executionId := strings.TrimPrefix(orgId, "execution:")
+		url = fmt.Sprintf("%s&execution_id=%s&authorization=%s", url, curExecutionId, apikey)
+	} else if len(apikey) > 0 {
+	} else {
+		log.Printf("[ERROR] No auth found for sendDatastoreUploadRequest in org %s", orgId)
 	}
 
 	// May need a fixed client here
@@ -3685,8 +3874,8 @@ func sendDatastoreUploadRequest(ctx context.Context, datastoreEntry []shuffle.Ca
 	}
 
 	if res.StatusCode != 200 {
-		log.Printf("[ERROR] Failed sending datastore request: %s. Status code: %d. Body: %s", err, res.StatusCode, string(body))
-		return errors.New(fmt.Sprintf("Failed sending datastore request (2): %s. Status code: %d. Body: %s", err, res.StatusCode, string(body)))
+		log.Printf("[ERROR] Failed sending datastore request (4): %s. Status code: %d. URL: %#v, Resp: %s", err, res.StatusCode, url, string(body))
+		return errors.New(fmt.Sprintf("Failed sending datastore request (4-2): %s. Status code: %d. Body: %s", err, res.StatusCode, string(body)))
 	}
 
 	//log.Printf("[DEBUG] Successfully sent datastore request for %d items
@@ -4331,10 +4520,6 @@ func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace
 
 		file, err := shuffle.GetFileSingul(ctx, fileId)
 		if err != nil || file.Status != "active" {
-			//if debug { 
-			//	log.Printf("[WARNING] Parameter file %s%s NOT found or not active. Status: %#v. Err: %s", shuffle.GetSingulStandaloneFilepath(), fileId, file.Status, err)
-			//}
-
 			continue
 		}
 
@@ -4351,8 +4536,9 @@ func GetOrgspecificParameters(ctx context.Context, fields []shuffle.Valuereplace
 			continue
 		}
 
-
-		// FIXME: What happens here?
+		// Prepares for the replacement to work well
+		// E.g. /api/data/{id} => /api/data/1234
+		// Loops all input fields to make sure they get set
 		stringContent := string(content)
 		for _, field := range fields {
 			stringContent = strings.ReplaceAll(stringContent, fmt.Sprintf("{%s}", field.Key), field.Value)
