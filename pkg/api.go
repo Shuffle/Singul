@@ -342,7 +342,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 
 
 	// Is there any way to ingest these as well? 
-	schemalessOutput, schemalessErr := schemaless.Translate(ctx, value.Label, marshalledFields, authConfig)
+	schemalessOutput, translationFilePath, schemalessErr := schemaless.Translate(ctx, value.Label, marshalledFields, authConfig)
 	if err != nil {
 		log.Printf("[ERROR] Singul - Failed doing direct translation in category action: %s", schemalessErr)
 		return nil, schemalessErr 
@@ -385,6 +385,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 				authorization, 
 				curExecutionId,
 				baseUrl, 
+				translationFilePath,
 				parsedTranslation, 
 				value, 
 				shuffle.Action{}, 
@@ -403,7 +404,7 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 // Was made for a... weird format, so we are just continuing to use that
 	
 // orgId is SOMETIMES mapped to executionId in cases for execution auth
-func autoUploadSingulOutput(ctx context.Context, orgId, curApikey, curExecutionId, curBackend string, parsedTranslation shuffle.SchemalessOutput, value shuffle.CategoryAction, secondAction shuffle.Action) {
+func autoUploadSingulOutput(ctx context.Context, orgId, curApikey, curExecutionId, curBackend , translationFile string, parsedTranslation shuffle.SchemalessOutput, value shuffle.CategoryAction, secondAction shuffle.Action) {
 	// Seems to work when authorization (curApikey) is NOT execution based
 
 	curOrg := orgId
@@ -582,6 +583,16 @@ func autoUploadSingulOutput(ctx context.Context, orgId, curApikey, curExecutionI
 					generatedItem["product"] = sourceMap
 				}
 			}
+		}
+
+		generatedItem["shuffle_execution_id"] = ""
+		if len(curExecutionId) > 0 {
+			generatedItem["shuffle_execution_id"] = curExecutionId
+		}
+
+		generatedItem["shuffle_translation_file"] = ""
+		if len(translationFile) > 0 {
+			generatedItem["shuffle_translation_file"] = translationFile
 		}
 
 		// Provide a short triage plan for the incident in english and update it in the internal shuffle datastore with the same key and category 'shuffle-security_incidents'.   Make sure it is JSON formatted like {"tasks": []} so that we can inject it in existing data. Some incidents are duds and should be closed quickly. Others are important ones. Others are missing important details. Use the following format for each task, and ONLY update the relevant fields: [{"assignee": "AI Agent", "title": "Title of the task", "category": "triage/containment/recovery/communication/documentation", "completed": false, "createdBy": "ai-agent@shuffler.io"}]. ONLY output as JSON and nothing more.   If the incident has RELEVANT tasks, add to them if necessary. When done, ALWAYS make sure the "status" is inProgress.
@@ -2924,7 +2935,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 
 			outputmap := make(map[string]interface{})
-			schemalessOutput, err := schemaless.Translate(ctx, value.Label, marshalledBody, authConfig)
+
+			schemalessOutput, translationFilePath, err := schemaless.Translate(ctx, value.Label, marshalledBody, authConfig)
 			if err != nil {
 				log.Printf("[ERROR] Schemaless failure for label '%s' in org '%s'", value.Label, orgId)
 
@@ -3031,7 +3043,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						log.Printf("[DEBUG] Should upload Singul result for label '%s'", value.Label)
 					}
 
-					autoUploadSingulOutput(ctx, curOrg, curApikey, curExecutionId, curBackend, parsedTranslation, value, secondAction)
+					autoUploadSingulOutput(ctx, curOrg, curApikey, curExecutionId, curBackend, translationFilePath, parsedTranslation, value, secondAction)
 				} else {
 					if debug { 
 						log.Printf("[DEBUG] Singul: NOT uploading. Label: %#v. LabelSplit: %#v. Org: %#v\n\n", value.Label, foundLabelSplit, curOrg)
