@@ -590,6 +590,12 @@ func autoUploadSingulOutput(ctx context.Context, orgId, curApikey, curExecutionI
 			generatedItem["shuffle_execution_id"] = curExecutionId
 		}
 
+		// In case of issues with public tickets
+		//generatedItem["shuffle_execution_authorization"] = ""
+		//if len(curExecutionId) > 0 && len(curApikey) > 0 {
+		//	generatedItem["shuffle_execution_authorization"] = curApikey 
+		//}
+
 		generatedItem["shuffle_translation_file"] = ""
 		if len(translationFile) > 0 {
 			generatedItem["shuffle_translation_file"] = translationFile
@@ -2929,9 +2935,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 
 			// No shuffler.io config for standalone runs
-			authConfig := fmt.Sprintf("false,%s,%s,%s,%s", baseUrl, authorization, orgId, optionalExecutionId)
+			authConfig := fmt.Sprintf("true,%s,%s,%s,%s", baseUrl, authorization, orgId, optionalExecutionId)
 			if standalone {
-				authConfig = "false"
+				authConfig = "true"
 			}
 
 			outputmap := make(map[string]interface{})
