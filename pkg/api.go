@@ -231,11 +231,11 @@ func RunAction(ctx context.Context, value shuffle.CategoryAction, retries ...int
 		Header: http.Header{},
 	}
 
-	if len(value.AuthorizationId) > 0 && len(value.ExecutionId) > 0 {
+	if len(value.Authorization) > 0 && len(value.ExecutionId) > 0 {
 		request.URL.Query().Set("execution_id", value.ExecutionId)
-		request.URL.Query().Set("authorization", value.AuthorizationId)
-	} else if len(value.AuthorizationId) > 0 { 
-		request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", value.AuthorizationId))
+		request.URL.Query().Set("authorization", value.Authorization)
+	} else if len(value.Authorization) > 0 { 
+		request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", value.Authorization))
 	}
 
 	if len(value.OrgId) > 0 { 
@@ -498,6 +498,7 @@ func autoUploadSingulOutput(ctx context.Context, orgId, curApikey, curExecutionI
 
 	allEntries := []shuffle.CacheKeyData{}
 	skippedEntries := 0
+	maxUploadEntries := 12
 
 	// Goroutine BUT wait on the end
 	for _, item := range foundArray {
@@ -507,8 +508,8 @@ func autoUploadSingulOutput(ctx context.Context, orgId, curApikey, curExecutionI
 			continue
 		}
 
-		if len(allEntries)+skippedEntries > 10 { 
-			log.Printf("[WARNING] Stopping Schemaless upload past 10 for %s and action %s", value.AppName, value.Label)
+		if len(allEntries)+skippedEntries > maxUploadEntries { 
+			log.Printf("[WARNING] Stopping Schemaless upload past %d for %s and action %s", maxUploadEntries, value.AppName, value.Label)
 			break
 		}
 
@@ -634,7 +635,7 @@ func autoUploadSingulOutput(ctx context.Context, orgId, curApikey, curExecutionI
 
 					// Auth oriented
 					OrgId: orgId,
-					AuthorizationId: curApikey, 
+					Authorization: curApikey, 
 					ExecutionId: curExecutionId,
 				}
 
@@ -3146,7 +3147,19 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					newExecutionId := request.URL.Query().Get("execution_id")
 					if len(newExecutionId) > 0 {
 						curExecutionId = newExecutionId
+					} else if len(value.ExecutionId) > 0 {
+						curExecutionId = value.ExecutionId
 					}
+
+					if len(curExecutionId) > 0 { 
+						newAuthId := request.URL.Query().Get("authorization")
+						if len(newAuthId) > 0 {
+							curApikey = newAuthId 
+						} else if len(value.Authorization) > 0 { 
+							curApikey = value.Authorization
+						}
+					}
+
 				}
 
 				// Fallback in case of execution auth instead of user auth
@@ -3163,7 +3176,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					autoUploadSingulOutput(ctx, curOrg, curApikey, curExecutionId, curBackend, translationFilePath, parsedTranslation, value, secondAction)
 				} else {
 					if debug { 
-						log.Printf("[DEBUG] Singul: NOT uploading. Label: %#v. LabelSplit: %#v. Org: %#v\n\n", value.Label, foundLabelSplit, curOrg)
+						log.Printf("[DEBUG] Singul: NOT uploading. Label: %#v. LabelSplit: %#v. Org: %#v, APIKEY LEN: %D\n\n", value.Label, foundLabelSplit, curOrg, len(curApikey))
 					}
 				}
 			}
