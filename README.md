@@ -6,7 +6,7 @@ Singul
 
 </h1>
 <h4 align="center">
-Connect to anything with a Singul line of code. Now open source (in Beta)!
+Connect to anything with a Singul line of code. Now open source!
 </h4>
 
 ## Usage
