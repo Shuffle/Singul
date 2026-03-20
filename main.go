@@ -1,21 +1,22 @@
 package main
 
 import (
-	"os"
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
-	"time"
-	"errors"
-	"context"
+	"os"
 	"strings"
-	"encoding/json"
+	"time"
+
 	"github.com/spf13/cobra"
 
-	"github.com/shuffle/singul/pkg"
 	"github.com/shuffle/shuffle-shared"
+	singul "github.com/shuffle/singul/pkg"
 )
 
-var debug = os.Getenv("DEBUG") == "true" 
+var debug = os.Getenv("DEBUG") == "true"
 
 // Singul -> Shuffle-shared?
 // OR
@@ -25,10 +26,10 @@ func runSingul(args []string, flags map[string]string) (string, error) {
 
 	ctx := context.Background()
 	value := shuffle.CategoryAction{
-		Label: args[0],
+		Label:   args[0],
 		AppName: args[1],
 
-		SkipWorkflow: true,
+		// SkipWorkflow: true,
 	}
 
 	parsedFields := []shuffle.Valuereplace{}
@@ -54,7 +55,7 @@ func runSingul(args []string, flags map[string]string) (string, error) {
 
 	// Make a fake ResponseWrite that can actaully receive data
 	startTime := time.Now()
-	if debug { 
+	if debug {
 		log.Printf("[DEBUG] Starting request handling with %d parameters", len(value.Fields))
 	}
 	data, err := singul.RunAction(ctx, value)
@@ -67,7 +68,7 @@ func runSingul(args []string, flags map[string]string) (string, error) {
 	marshalMap := make(map[string]interface{})
 	err = json.Unmarshal([]byte(data), &marshalMap)
 	if err != nil {
-		if debug { 
+		if debug {
 			log.Printf("[DEBUG] Not valid JSON to format")
 		}
 	} else {
@@ -79,17 +80,15 @@ func runSingul(args []string, flags map[string]string) (string, error) {
 		}
 	}
 
-
 	fmt.Printf("\n\n===== API OUTPUT =====\n\n%s\n\n", string(data))
-	if err != nil { 
+	if err != nil {
 		fmt.Printf("===== ERROR =====\n\n%s\n\n", err.Error())
 	}
 
 	endTime := time.Now()
-	if debug { 
+	if debug {
 		log.Printf("[DEBUG] Time taken: %v", endTime.Sub(startTime))
 	}
-
 
 	return string(data), nil
 }
@@ -103,7 +102,7 @@ func init() {
 func rootCmdRun(cmd *cobra.Command, args []string) {
 	parsedArgs := []string{}
 
-    parsedFlags := map[string]string{}
+	parsedFlags := map[string]string{}
 	for i := 0; i < len(args); i++ {
 		if args[i][0] == '-' {
 			// handle both -f val, --flag=val and --flag val
@@ -139,7 +138,7 @@ func rootCmdRun(cmd *cobra.Command, args []string) {
 
 	// Send request to singul.io/apps/{appname}
 	// This is an API key that is public for Algolia
-	// It has restrictions per IP address as to avoid 
+	// It has restrictions per IP address as to avoid
 	// Use the Algolia API to search for apps with the name, before asking for the public app from shuffler.io
 	if len("ALGOLIA_PUBLICKEY") == 0 {
 		os.Setenv("ALGOLIA_PUBLICKEY", "14bfd695f2152664bb16ca8e8c3e8281")
@@ -167,71 +166,71 @@ func rootCmdRun(cmd *cobra.Command, args []string) {
 	if strings.ToLower(parsedArgs[0]) == "authenticate" {
 		singul.AuthenticateAppCli(parsedArgs[1])
 		return
-	} 
+	}
 
 	runSingul(parsedArgs, parsedFlags)
 }
 
 // Utility helpers
 func containsEqual(s string) bool {
-    for i := 1; i < len(s); i++ {
-        if s[i] == '=' {
-            return true
-        }
-    }
-    return false
+	for i := 1; i < len(s); i++ {
+		if s[i] == '=' {
+			return true
+		}
+	}
+	return false
 }
 
 func splitEqual(s string) [2]string {
-    for i := 1; i < len(s); i++ {
-        if s[i] == '=' {
-            return [2]string{s[:i], s[i+1:]}
-        }
-    }
-    return [2]string{s, ""}
+	for i := 1; i < len(s); i++ {
+		if s[i] == '=' {
+			return [2]string{s[:i], s[i+1:]}
+		}
+	}
+	return [2]string{s, ""}
 }
 
 var rootCmd = &cobra.Command{
-	Use:   "Singul CLI",
-	Short: "A CLI that accepts arbitrary arguments",
-	Args:  cobra.ArbitraryArgs, 
+	Use:                "Singul CLI",
+	Short:              "A CLI that accepts arbitrary arguments",
+	Args:               cobra.ArbitraryArgs,
 	DisableFlagParsing: true,
-	Run: rootCmdRun,
+	Run:                rootCmdRun,
 }
 
 func main() {
-	if debug { 
+	if debug {
 		log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	}
 
 	//translatedData := `{"data": "myhost.example.com", "data_type": "domain"}`
 	/*
-	translateData := `{
-	  "fields": {
-		"project": {
-		  "key": "SHUF"
-		},
-		"summary": "{{summary}}",
-		"issuetype": {
-		  "name": "{{issuetype[]}}"
-		}
-	  }
-	}`
+		translateData := `{
+		  "fields": {
+			"project": {
+			  "key": "SHUF"
+			},
+			"summary": "{{summary}}",
+			"issuetype": {
+			  "name": "{{issuetype[]}}"
+			}
+		  }
+		}`
 
-	data := []shuffle.Valuereplace{
-		shuffle.Valuereplace{
-			Key: "body",
-			Value: translateData,
-		},
-	}
-	resp := shuffle.TranslateBadFieldFormats(data)
-	log.Printf("RESP: %#v", resp[0].Value)
-	os.Exit(3)
+		data := []shuffle.Valuereplace{
+			shuffle.Valuereplace{
+				Key: "body",
+				Value: translateData,
+			},
+		}
+		resp := shuffle.TranslateBadFieldFormats(data)
+		log.Printf("RESP: %#v", resp[0].Value)
+		os.Exit(3)
 	*/
 
 	// Register subcommands to the math command
 	if err := rootCmd.Execute(); err != nil {
-        log.Printf("%#v", err)
-        os.Exit(1)
-    }
+		log.Printf("%#v", err)
+		os.Exit(1)
+	}
 }

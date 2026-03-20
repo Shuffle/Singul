@@ -5,14 +5,15 @@ go 1.24.0
 toolchain go1.24.4
 
 //replace github.com/frikky/schemaless => ../schemaless
+
 //replace github.com/shuffle/shuffle-shared => ../shuffle-shared
 
 require (
 	github.com/andybalholm/brotli v1.2.0
 	github.com/frikky/kin-openapi v0.42.0
-	github.com/frikky/schemaless v0.0.29
+	github.com/frikky/schemaless v0.0.32
 	github.com/satori/go.uuid v1.2.0
-	github.com/shuffle/shuffle-shared v1.0.2
+	github.com/shuffle/shuffle-shared v1.1.1
 	github.com/spf13/cobra v1.9.1
 )
 
