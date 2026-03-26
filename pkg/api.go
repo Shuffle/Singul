@@ -231,9 +231,11 @@ func RunAction(ctx context.Context, value shuffle.CategoryAction, retries ...int
 		Header: http.Header{},
 	}
 
+	q := request.URL.Query() // step 1 (copy)
 	if len(value.Authorization) > 0 && len(value.ExecutionId) > 0 {
-		request.URL.Query().Set("execution_id", value.ExecutionId)
-		request.URL.Query().Set("authorization", value.Authorization)
+		q.Set("execution_id", value.ExecutionId)
+		q.Set("authorization", value.Authorization)
+		request.URL.RawQuery = q.Encode() 
 	} else if len(value.Authorization) > 0 { 
 		request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", value.Authorization))
 	}
@@ -498,7 +500,7 @@ func autoUploadSingulOutput(ctx context.Context, orgId, curApikey, curExecutionI
 
 	allEntries := []shuffle.CacheKeyData{}
 	skippedEntries := 0
-	maxUploadEntries := 12
+	maxUploadEntries := 10 
 
 	// Goroutine BUT wait on the end
 	for _, item := range foundArray {
@@ -508,7 +510,7 @@ func autoUploadSingulOutput(ctx context.Context, orgId, curApikey, curExecutionI
 			continue
 		}
 
-		if len(allEntries)+skippedEntries > maxUploadEntries { 
+		if len(allEntries)+skippedEntries >= maxUploadEntries { 
 			log.Printf("[WARNING] Stopping Schemaless upload past %d for %s and action %s", maxUploadEntries, value.AppName, value.Label)
 			break
 		}
@@ -646,8 +648,6 @@ func autoUploadSingulOutput(ctx context.Context, orgId, curApikey, curExecutionI
 					go RunAction(context.Background(), newValue, 0)
 				}
 
-				//os.Exit(3)
-
 				skippedEntries += 1
 				continue
 			}
@@ -714,16 +714,16 @@ func autoUploadSingulOutput(ctx context.Context, orgId, curApikey, curExecutionI
 				log.Printf("[DEBUG] Found item in cache for label %s in org %s", foundIdentifier, orgId)
 			}
 
-			// We already have it, skip
-
+			// We already have it, skip (?)
 			if !strings.HasPrefix(value.Label, "get_") {
 				continue
 			} else {
-				log.Printf("[DEBUG] Skipping cache for get_")
+				log.Printf("[DEBUG] Skipping cache check for get_")
 			}
 		}
 
-		shuffle.SetCache(ctx, cacheKey, []byte("true"), 60*60*24*3) // 3 days as we don't want to keep running the same one over and over.
+		//shuffle.SetCache(ctx, cacheKey, []byte("true"), 60*60*24*3) // 3 days as we don't want to keep running the same one over and over.
+		shuffle.SetCache(ctx, cacheKey, []byte("true"), 60) // 3 days as we don't want to keep running the same one over and over.
 
 		marshalledBody, err := json.Marshal(generatedItem)
 		if err != nil {
@@ -1968,7 +1968,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	if debug {
 		// func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowAppAction) shuffle.WorkflowAppAction {
-		log.Printf("SECONDACTION: %#v. Original: %#v", secondAction.Name, originalActionName)
+		log.Printf("[DEBUG] SECONDACTION: %#v. Original: %#v", secondAction.Name, originalActionName)
 	}
 
 	if step > 0 {
@@ -2536,8 +2536,13 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		if !standalone && request != nil && len(request.Header.Get("Authorization")) == 0 && len(request.URL.Query().Get("execution_id")) > 0 && len(request.URL.Query().Get("authorization")) > 0 {
 			apprunUrl = fmt.Sprintf("%s&execution_id=%s&authorization=%s", apprunUrl, request.URL.Query().Get("execution_id"), request.URL.Query().Get("authorization"))
 
-			authorization = request.URL.Query().Get("authorization")
 			optionalExecutionId = request.URL.Query().Get("execution_id")
+			authorization = request.URL.Query().Get("authorization")
+		} else if len(value.Authorization) > 0 && len(value.ExecutionId) == 0 {
+			apprunUrl = fmt.Sprintf("%s&execution_id=%s&authorization=%s", apprunUrl, value.ExecutionId, value.Authorization)
+
+			optionalExecutionId = value.ExecutionId
+			authorization = value.Authorization
 		}
 
 		if len(value.OrgId) > 0 {
