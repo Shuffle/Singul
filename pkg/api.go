@@ -1509,12 +1509,12 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	}
 
 	// Custom handler for certain translations
+	isShuffleApp := shuffle.IsShuffleApp(selectedApp)
 	if len(selectedAction.Name) == 0 && value.Label != "discover_app" {
 		log.Printf("[WARNING] Couldn't find the label '%s' in app '%s'.", value.Label, selectedApp.Name)
 
 		//selectedApp := AutofixAppLabels(selectedApp, value.Label)
-
-		if value.Label != "app_authentication" && value.Label != "authenticate_app" && value.Label != "discover_app" {
+		if !isShuffleApp && value.Label != "app_authentication" && value.Label != "authenticate_app" && value.Label != "discover_app" {
 			respBody = []byte(fmt.Sprintf(`{"success": false, "app_id": "%s", "reason": "Failed finding action matching '%s' in app '%s'. If this is wrong, please suggest a label by finding the app in Shuffle (%s), OR contact support@shuffler.io and we can help with labeling."}`, selectedApp.ID, value.Label, strings.ReplaceAll(selectedApp.Name, "_", " "), fmt.Sprintf("https://shuffler.io/apis/%s", selectedApp.ID)))
 
 			resp.WriteHeader(500)
@@ -1812,10 +1812,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			}
 		}
 
-		if selectedApp.Name == "Shuffle_Datastore" {
-			if debug { 
-				log.Printf("[DEBUG] Failing over to NO AUTH for shuffle datastore")
-			}
+		if isShuffleApp { 
 			requiresAuth = false
 		}
 
@@ -1877,7 +1874,8 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	// Send back with SUCCESS as we already have an authentication
 	// Use the labels to show what Jira can do
-	if value.Label == "app_authentication" || value.Label == "authenticate_app" || value.Label == "discover_app" {
+	isShuffleApp = shuffle.IsShuffleApp(selectedApp)
+	if !isShuffleApp && (value.Label == "app_authentication" || value.Label == "authenticate_app" || value.Label == "discover_app") {
 		ifSuccess := true
 		reason := fmt.Sprintf("Please authenticate with %s", selectedApp.Name)
 
@@ -3794,7 +3792,7 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 	for paramIndex, param := range action.Parameters {
 		if param.Name == "method" {
 			if param.Value == "" {
-				log.Printf("[ERROR] Failed to map method for original action name '%s' to custom_action parameters. Returning original action.", sourceActionName)
+				log.Printf("[ERROR] Failed to map method for original action name '%s' to custom_action parameters. Returning original action. App: '%s' (%s)", sourceActionName, action.AppName, action.AppID)
 			}
 
 			if param.Value == "GET" { 
@@ -3827,7 +3825,7 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 	}
 
 	if !originalActionNameFound {
-		log.Printf("[ERROR] Failed to map original action name '%s' to custom_action parameters. Returning original action.", originalActionName)
+		log.Printf("[ERROR] Failed to map original action name '%s' to custom_action parameters. Returning original action. App: '%s' (%s).", originalActionName, action.AppName, action.AppID)
 		return action
 	}
 
