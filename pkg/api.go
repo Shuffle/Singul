@@ -31,7 +31,8 @@ import (
 )
 
 // Runs attempts up to X times
-var maxRerunAttempts = 7
+// var maxRerunAttempts = 7
+var maxRerunAttempts = 3
 var standalone = false
 var debug = os.Getenv("DEBUG") == "true"
 var basepath = os.Getenv("SHUFFLE_FILE_LOCATION")
@@ -190,6 +191,9 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 		}
 	}
 
+	ctx = context.WithValue(ctx, "caller", "RunCategoryAction")
+	ctx = context.WithValue(ctx, "org_id", org.Id)
+
 	RunActionWrapper(ctx, user, value, resp, request)
 }
 
@@ -245,6 +249,14 @@ func RunAction(ctx context.Context, value shuffle.CategoryAction, retries ...int
 		request.Header.Set("Org-Id", value.OrgId)
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if len(ctx.Value("caller").(string)) == 0 {
+		ctx = context.WithValue(ctx, "caller", "RunAction")
+	}
+
 	foundResponse, err := RunActionWrapper(ctx, user, value, resp, request)
 	if strings.Contains(string(foundResponse), `success": false`) {
 		outputString := outputMarshal{}
@@ -280,6 +292,15 @@ func RunAction(ctx context.Context, value shuffle.CategoryAction, retries ...int
 
 func GetActionAIResponseWrapper(ctx context.Context, input shuffle.QueryInput) ([]byte, error) {
 	resp := NewFakeResponseWriter()
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// lets get the caller, if empty lets add the current caller function
+	if len(ctx.Value("caller").(string)) == 0 {
+		ctx = context.WithValue(ctx, "caller", "GetActionAIResponseWrapper")
+	}
 
 	foundResponse, err := shuffle.GetActionAIResponse(ctx, resp, shuffle.User{}, shuffle.Org{}, input.OutputFormat, input)
 	if err != nil {
@@ -799,6 +820,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		value.OrgId = user.ActiveOrg.Id
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if len(ctx.Value("caller").(string)) == 0 {
+		ctx = context.WithValue(ctx, "caller", "RunActionWrapper")
+	}
+
 	// Handles direct translations instead of app runs
 	//strings.ToLower(strings.ReplaceAll(value.Label, " ", "_")) == "translate_standard" && 
 	if strings.ToLower(strings.ReplaceAll(value.Category, " ", "_")) == "translate_standard" {
@@ -932,7 +961,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 
 	// WITHOUT finding the app first
-	if len(value.AppName) == 0 && len(value.Category) == 0 && len(value.AppId) == 0 && (value.Label == "api" || value.Label == "custom_action" || value.Action == "custom_action") {
+	if len(value.AppName) == 0 && len(value.Category) == 0 && len(value.AppId) == 0 && (value.Label == "api" || value.Label == "custom_action" || value.Action == "custom_action" || value.Label == "http" || value.Action == "http") {
 		log.Printf("[INFO] Got Singul 'custom action' request WITHOUT app. Mapping to HTTP 1.4.0.")
 
 		value = GetUpdatedHttpValue(value)
@@ -1579,7 +1608,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				continue
 			}
 
-			fixedBody, err := shuffle.UpdateActionBody(selectedAction)
+			fixedBody, err := shuffle.UpdateActionBody(ctx, selectedAction)
 			if err != nil {
 				log.Printf("[ERROR] Failed getting correct action body for %s: %s", selectedAction.Name, err)
 				continue
@@ -2073,17 +2102,33 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		if param.Name == "body" {
 			// FIXME: Look for key:values and inject values into them
 			// This SHOULD be just a dumb injection of existing value.Fields & value.OptionalFields for now with synonyms, but later on it should be a more advanced (use schemaless & cross org referencing)
-			if len(param.Example) > 0 && len(param.Value) == 0 {
+
+			// Check if this is a GET request - GET requests should NOT have a body
+			isGetRequest := false
+			for _, p := range secondAction.Parameters {
+				if p.Name == "method" && strings.ToUpper(p.Value) == "GET" {
+					isGetRequest = true
+					break
+				}
+			}
+
+			// Only set example data for non-GET requests
+			if !isGetRequest && len(param.Example) > 0 && len(param.Value) == 0 {
 				param.Value = param.Example
 			} else if len(param.Value) > 0 {
 			} else {
 				//param.Value = ""
-				log.Printf("[DEBUG] Found body param. Validating: %#v", param)
-				if !fieldChanged {
+				if debug {
+					log.Printf("[DEBUG] Found body param. Validating: %#v (GET request: %v)", param, isGetRequest)
+				}
+				if !fieldChanged && !isGetRequest {
 					log.Printf("\n\nBody not filled yet. Should fill it in (somehow) based on the existing input fields.\n\n")
 				}
 
-				param.Required = true
+				// Don't mark body as required for GET requests
+				if !isGetRequest {
+					param.Required = true
+				}
 			}
 		}
 
@@ -2151,7 +2196,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			continue
 		}
 
-		fixedBody, err := shuffle.UpdateActionBody(selectedAction)
+		fixedBody, err := shuffle.UpdateActionBody(ctx, selectedAction)
 		if err != nil {
 			log.Printf("[ERROR] Failed getting correct action body for %s: %s", selectedAction.Name, err)
 			continue
@@ -2403,7 +2448,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//formattedQueryFields = append(formattedQueryFields, fmt.Sprintf("%s=%s", field.Key, field.Value))
 
 			secondAction.Name = originalActionName
-			newOutputAction, _, err := shuffle.RunSelfCorrectingRequest(formattedQueryFieldsValueReplace, secondAction, 400, formattedQuery, fullUrl, outputBody, secondAction.AppName, value.Query, inputdata, 0)
+			newOutputAction, _, err := shuffle.RunSelfCorrectingRequest(ctx, formattedQueryFieldsValueReplace, secondAction, 400, formattedQuery, fullUrl, outputBody, secondAction.AppName, value.Query, inputdata, 0)
 
 			if err != nil {
 				log.Printf("[ERROR] Failed running self-correcting request for custom_action: %s", err)
@@ -2936,6 +2981,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					// additionalInfo: recursively filled in from this function 
 					// inputQuery: the input we got initially
 					outputString, outputAction, err, additionalInfo := shuffle.FindNextApiStep(
+						ctx,
 						value.Fields,
 						secondAction, 
 						apprunBody, 
@@ -3830,10 +3876,16 @@ func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
 	foundUrl := ""
 	newFields := []shuffle.Valuereplace{}
 	for _, field := range value.Fields {
+		lowerKey := strings.ToLower(field.Key)
+
+		// Don't skip proper HTTP fields (headers, body, etc) even if they're JSON
+		isProperHttpField := lowerKey == "headers" || lowerKey == "body" || lowerKey == "url" || lowerKey == "method"
 
 		// Looks for the HTTP 'GET <url>' pattern pre-headers
-		if (strings.Contains(field.Value, "http") && strings.Contains(field.Value, "://") && (strings.Contains(field.Value, "GET") || strings.Contains(field.Value, "POST") || strings.Contains(field.Value, "PUT") || strings.Contains(field.Value, "PATCH") || strings.Contains(field.Value, "DELETE"))) || strings.HasPrefix(field.Value, "{") && strings.HasSuffix(field.Value, "}") {
-			if debug { 
+		// BUT: Don't apply this logic to proper HTTP fields like headers/body
+		if !isProperHttpField && ((strings.Contains(field.Value, "http") && strings.Contains(field.Value, "://") && (strings.Contains(field.Value, "GET") || strings.Contains(field.Value, "POST") || strings.Contains(field.Value, "PUT") || strings.Contains(field.Value, "PATCH") || strings.Contains(field.Value, "DELETE"))) || (strings.HasPrefix(field.Value, "{") && strings.HasSuffix(field.Value, "}"))) {
+			log.Printf("[HEYOOO] Singul - Found HTTP request in field %s: %s", field.Key, field.Value)
+			if debug {
 				log.Printf("[INFO] Skipping and auto-mapping field %s in HTTP custom action due to probable URL+method value: %s", field.Key, field.Value)
 			}
 
@@ -3858,7 +3910,7 @@ func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
 				err := json.Unmarshal([]byte(field.Value), &mappedFields)
 				if err == nil {
 					for key, val := range mappedFields {
-						if debug { 
+						if debug {
 							log.Printf("[DEBUG] APPENDING FIELD FROM MAPPED FIELDS: %s => %#v", key, val)
 						}
 
@@ -3877,18 +3929,18 @@ func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
 			continue
 		}
 
-		if strings.ToLower(field.Key) == "url" {
+		if lowerKey == "url" {
 			urlFound = true
 		}
 
-		if strings.ToLower(field.Key) == "method" {
+		if lowerKey == "method" {
 			value.Label = strings.ToUpper(field.Value)
 			value.Action = value.Label
 			continue
 		}
 
-		if strings.ToLower(field.Key) == "body" {
-			// Try to unmarshal it 
+		if lowerKey == "body" {
+			// Try to unmarshal it
 			err := json.Unmarshal([]byte(field.Value), &parsedBody)
 			if err == nil {
 				log.Printf("[INFO] Mapped body field to HTTP custom action body")
@@ -3907,46 +3959,59 @@ func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
 
 	// Extra mapping handlers. This is in case the incomg data was in a weird format
 	// LLMs do be unstructured (:
-	parsedNewfields := []shuffle.Valuereplace{}
-	for key, originalVal := range parsedBody {
-		val := ""
-		if foundVal, ok := originalVal.(string); ok {
-			val = foundVal
-		} else if foundVal, ok := originalVal.(float64); ok {
-			val = fmt.Sprintf("%f", foundVal)
-		} else if foundVal, ok := originalVal.(bool); ok {
-			val = fmt.Sprintf("%t", foundVal)
-		} else if foundVal, ok := originalVal.(int); ok {
-			val = fmt.Sprintf("%d", foundVal)
-		} else {
-			marshalledVal, err := json.Marshal(originalVal)
-			if err != nil {
-				log.Printf("[WARNING] Skipping field %s in HTTP custom action due to unmarshalable value: %#v", key, originalVal)
-				continue
-			} else {
-				val = string(marshalledVal)
-			}
+	// ONLY use this if we don't already have proper fields (url, body, headers, method)
+	hasProperFields := false
+	for _, field := range newFields {
+		lowerKey := strings.ToLower(field.Key)
+		if lowerKey == "url" || lowerKey == "body" || lowerKey == "headers" {
+			hasProperFields = true
+			break
 		}
-
-		if len(val) == 0 {
-			log.Printf("[WARNING] Singul - Skipping empty field %s in HTTP custom action", key)
-			continue
-		}
-
-		if strings.ToLower(key) == "method" {
-			value.Label = strings.ToUpper(val)
-			value.Action = value.Label
-			continue
-		}
-
-		parsedNewfields = append(parsedNewfields, shuffle.Valuereplace{
-			Key:   key,
-			Value: val,
-		})
 	}
 
-	if len(parsedNewfields) > 0 {
-		newFields = parsedNewfields
+	// Only parse body into separate fields if we don't have proper HTTP fields already
+	if !hasProperFields && len(parsedBody) > 0 {
+		parsedNewfields := []shuffle.Valuereplace{}
+		for key, originalVal := range parsedBody {
+			val := ""
+			if foundVal, ok := originalVal.(string); ok {
+				val = foundVal
+			} else if foundVal, ok := originalVal.(float64); ok {
+				val = fmt.Sprintf("%f", foundVal)
+			} else if foundVal, ok := originalVal.(bool); ok {
+				val = fmt.Sprintf("%t", foundVal)
+			} else if foundVal, ok := originalVal.(int); ok {
+				val = fmt.Sprintf("%d", foundVal)
+			} else {
+				marshalledVal, err := json.Marshal(originalVal)
+				if err != nil {
+					log.Printf("[WARNING] Skipping field %s in HTTP custom action due to unmarshalable value: %#v", key, originalVal)
+					continue
+				} else {
+					val = string(marshalledVal)
+				}
+			}
+
+			if len(val) == 0 {
+				log.Printf("[WARNING] Singul - Skipping empty field %s in HTTP custom action", key)
+				continue
+			}
+
+			if strings.ToLower(key) == "method" {
+				value.Label = strings.ToUpper(val)
+				value.Action = value.Label
+				continue
+			}
+
+			parsedNewfields = append(parsedNewfields, shuffle.Valuereplace{
+				Key:   key,
+				Value: val,
+			})
+		}
+
+		if len(parsedNewfields) > 0 {
+			newFields = parsedNewfields
+		}
 	}
 
 	value.Fields = newFields
@@ -4780,7 +4845,7 @@ func GetActionFromLabel(ctx context.Context, app shuffle.WorkflowApp, label stri
 			//log.Printf("[DEBUG] Calling AutofixAppLabels")
 
 			// Make it FORCE look for a specific label if it exists, otherwise
-			newApp, guessedAction := shuffle.AutofixAppLabels(app, label, keys)
+			newApp, guessedAction := shuffle.AutofixAppLabels(ctx, app, label, keys)
 
 			// print the found action parameters
 			//for _, param := range guessedAction.Parameters {
@@ -5029,6 +5094,14 @@ func AnalyzeIntentAndCorrectApp(ctx context.Context, query string, fields []shuf
 		fieldsSummary += field.Key + ":" + field.Value[:fieldLen] + "|"
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if len(ctx.Value("caller").(string)) == 0 {
+		ctx = context.WithValue(ctx, "caller", "AnalyzeIntentAndCorrectApp")
+	}
+
 	systemMessage := `You are an API identification assistant. 
 Your job is to determine the most likely intended service or app that an API request belongs to.
 The provided intent or query field may describe the reason or goal of the request and may be incorrect, vague, or misleading. Do not blindly trust it
@@ -5038,11 +5111,17 @@ Your goal is to identify the service the request should belong to, not necessari
 If the URL and fields clearly match a known service, return that service even if the intent text disagrees.
 If the request does not strongly match any known service and appears to be a generic or custom HTTP call, return "http"
 
+IMPORTANT: If the request already contains authentication credentials (API keys, tokens, bearer tokens in headers, bot tokens in URL, etc.), 
+return "http" because the user has already provided auth and wants to make a direct HTTP call.
+Do NOT try to map it to a specific app when auth is already present.
+
 Examples:
 - gmail.googleapis.com → Gmail
 - slack.com/api → Slack  
 - api.github.com → GitHub
 - random-api.com → http
+- api.telegram.org/bot123456:TOKEN/sendMessage → http (has bot token, keep as HTTP)
+- any URL with Authorization header → http (has auth, keep as HTTP)
 
 Output rules:
 Return only the service or app name.
@@ -5059,7 +5138,7 @@ Return ONLY the app/service name (e.g., Gmail, Slack, GitHub).
 If this is a generic HTTP call with no specific service, return "http".`,
 		query, urlValue, fieldsSummary)
 
-	responseBody, err := shuffle.RunAiQuery(systemMessage, userMessage)
+	responseBody, err := shuffle.RunAiQuery(ctx, systemMessage, userMessage)
 	if err != nil {
 		log.Printf("[WARNING] Failed calling LLM for app intent correction: %s", err)
 		return ""
