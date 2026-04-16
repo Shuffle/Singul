@@ -360,13 +360,13 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 
 	// Is there any way to ingest these as well? 
 	schemalessOutput, translationFilePath, schemalessErr := schemaless.Translate(ctx, value.Label, marshalledFields, authConfig)
-	if err != nil {
+	if schemalessErr != nil {
 		log.Printf("[ERROR] Singul - Failed doing direct translation in category action: %s", schemalessErr)
-		return nil, schemalessErr 
+		return schemalessOutput, schemalessErr 
 	}
 
 	// Handles upload of the same value(s)
-	if schemalessOutput != nil && string(schemalessOutput) != string(marshalledFields) {
+	if schemalessOutput != nil && string(schemalessOutput) != string(marshalledFields) && schemalessErr == nil {
 		if debug { 
 			log.Printf("[DEBUG] Got direct translation output that differs from input. Trying to upload to datastore. Label: %s", value.Label)
 		}
@@ -409,10 +409,6 @@ func handleDirectTranslation(ctx context.Context, user shuffle.User, value shuff
 			) 
 		}
 	}
-
-	//if debug {
-	//	log.Printf("[DEBUG] Singul - Got direct translation output: %#v", string(schemalessOutput))
-	//}
 
 	return schemalessOutput, err
 }
@@ -810,8 +806,20 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		respBody, err := handleDirectTranslation(ctx, user, value, request)
 		if err != nil {
 			log.Printf("[ERROR] Failed doing direct translation: %s", err)
+
+			result := shuffle.ResultChecker{
+				Success: false,
+				Reason: fmt.Sprintf("Failed doing direct translation. Contact support@shuffler.io if this persists."),
+				Extra: err.Error(),
+			}
+
+			respBody, err = json.Marshal(result)
+			if err != nil {
+				log.Printf("[ERROR] Failed marshaling result in direct translation error handling: %s", err)
+				respBody = []byte(fmt.Sprintf(`{"success": false, "extra": "Translator ONLY supports valid JSON.", "reason": "Failed doing direct translation: %s. Contact support@shuffler.io if this persists."}`, err))
+			}
+			
 			resp.WriteHeader(500)
-			respBody = []byte(fmt.Sprintf(`{"success": false, "extra": "PS: Translator ONLY supports valid JSON.", "reason": "Failed doing direct translation: %s. Contact support@shuffler.io if this persists."}`, err))
 		} else {
 			resp.WriteHeader(200)
 		}
