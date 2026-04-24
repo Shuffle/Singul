@@ -31,8 +31,8 @@ import (
 )
 
 // Runs attempts up to X times
-// var maxRerunAttempts = 7
-var maxRerunAttempts = 3
+var maxRerunAttempts = 7
+// var maxRerunAttempts = 3
 var standalone = false
 var debug = os.Getenv("DEBUG") == "true"
 var basepath = os.Getenv("SHUFFLE_FILE_LOCATION")
@@ -2103,30 +2103,35 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			// FIXME: Look for key:values and inject values into them
 			// This SHOULD be just a dumb injection of existing value.Fields & value.OptionalFields for now with synonyms, but later on it should be a more advanced (use schemaless & cross org referencing)
 
-			// Check if this is a GET request - GET requests should NOT have a body
-			isGetRequest := false
+			// Check if this method traditionally expects a body. 
+			// We only enforce a body requirement for standard modifying methods.
+			// GET, HEAD, OPTIONS, TRACE, and unknown custom methods should not have a required body forced upon them.
+			methodExpectsBody := true
 			for _, p := range secondAction.Parameters {
-				if p.Name == "method" && strings.ToUpper(p.Value) == "GET" {
-					isGetRequest = true
+				if p.Name == "method" {
+					method := strings.ToUpper(p.Value)
+					if method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" {
+						methodExpectsBody = false
+					}
 					break
 				}
 			}
 
-			// Only set example data for non-GET requests
-			if !isGetRequest && len(param.Example) > 0 && len(param.Value) == 0 {
+			// Only set example data for methods that expect a body
+			if methodExpectsBody && len(param.Example) > 0 && len(param.Value) == 0 {
 				param.Value = param.Example
 			} else if len(param.Value) > 0 {
 			} else {
 				//param.Value = ""
 				if debug {
-					log.Printf("[DEBUG] Found body param. Validating: %#v (GET request: %v)", param, isGetRequest)
+					log.Printf("[DEBUG] Found body param. Validating: %#v (Expects body: %v)", param, methodExpectsBody)
 				}
-				if !fieldChanged && !isGetRequest {
+				if !fieldChanged && methodExpectsBody {
 					log.Printf("\n\nBody not filled yet. Should fill it in (somehow) based on the existing input fields.\n\n")
 				}
 
-				// Don't mark body as required for GET requests
-				if !isGetRequest {
+				// Only force mark body as required if the method typically expects one
+				if methodExpectsBody {
 					param.Required = true
 				}
 			}
@@ -3884,7 +3889,6 @@ func GetUpdatedHttpValue(value shuffle.CategoryAction) shuffle.CategoryAction {
 		// Looks for the HTTP 'GET <url>' pattern pre-headers
 		// BUT: Don't apply this logic to proper HTTP fields like headers/body
 		if !isProperHttpField && ((strings.Contains(field.Value, "http") && strings.Contains(field.Value, "://") && (strings.Contains(field.Value, "GET") || strings.Contains(field.Value, "POST") || strings.Contains(field.Value, "PUT") || strings.Contains(field.Value, "PATCH") || strings.Contains(field.Value, "DELETE"))) || (strings.HasPrefix(field.Value, "{") && strings.HasSuffix(field.Value, "}"))) {
-			log.Printf("[HEYOOO] Singul - Found HTTP request in field %s: %s", field.Key, field.Value)
 			if debug {
 				log.Printf("[INFO] Skipping and auto-mapping field %s in HTTP custom action due to probable URL+method value: %s", field.Key, field.Value)
 			}
@@ -5111,17 +5115,12 @@ Your goal is to identify the service the request should belong to, not necessari
 If the URL and fields clearly match a known service, return that service even if the intent text disagrees.
 If the request does not strongly match any known service and appears to be a generic or custom HTTP call, return "http"
 
-IMPORTANT: If the request already contains authentication credentials (API keys, tokens, bearer tokens in headers, bot tokens in URL, etc.), 
-return "http" because the user has already provided auth and wants to make a direct HTTP call.
-Do NOT try to map it to a specific app when auth is already present.
 
 Examples:
 - gmail.googleapis.com → Gmail
 - slack.com/api → Slack  
 - api.github.com → GitHub
 - random-api.com → http
-- api.telegram.org/bot123456:TOKEN/sendMessage → http (has bot token, keep as HTTP)
-- any URL with Authorization header → http (has auth, keep as HTTP)
 
 Output rules:
 Return only the service or app name.
