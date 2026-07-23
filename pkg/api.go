@@ -2379,7 +2379,17 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		newMissingFields = append(newMissingFields, missingField)
 	}
 
-	missingFields = newMissingFields
+	// Clean them up for empty values
+	cleanedMissingFields := []string{}
+	for _, missingField := range newMissingFields {
+		if missingField == "" || missingField == "\t" {
+			continue
+		}
+
+		cleanedMissingFields = append(cleanedMissingFields, missingField)
+	}
+
+	missingFields = cleanedMissingFields 
 
 	// AI fallback mechanism to handle missing fields
 	// This is in case some fields are not sent in properly
@@ -2916,7 +2926,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				}
 			}
 
-			if !selectedApp.Generated { 
+			if !selectedApp.Generated {
 				httpOutput.Success = true
 				parsedTranslation.Success = true 
 
@@ -3162,8 +3172,6 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				}
 
 				parsedTranslation.Success = true
-				//parsedTranslation.RawOutput = string(schemalessOutput)
-
 				err = json.Unmarshal(schemalessOutput, &outputmap)
 				if err != nil {
 
@@ -3295,8 +3303,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		log.Printf("[ERROR] Done in autocorrect loop after %d iterations. This means Singul failure for action '%s' in org %s.", maxRerunAttempts, secondAction.Name, user.ActiveOrg.Id)
 
 		//parsedHttp, err := json.Marshal(httpOutput)
+		//parsedTranslation.Success = false
+		
+		parsedTranslation.Success = true 
 		parsedTranslation.Retries = maxRerunAttempts
-		parsedTranslation.Success = false
 		parsedTranslation.RawResponse = httpOutput
 		parsedTranslation.Output = httpOutput.Body
 
@@ -3635,10 +3645,6 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 
 		// Removes authentication fields
 		if param.Configuration && (param.Value == "" || strings.Contains(strings.ToLower(param.Value), "replace") || strings.Contains(strings.ToLower(param.Value), "example")) {
-			if debug { 
-				log.Printf("[DEBUG] SKIPPING CONFIG PARAM: %#v", param.Name)
-			}
-
 			continue
 		}
 
@@ -3835,10 +3841,6 @@ func GetTranslatedHttpAction(app shuffle.WorkflowApp, action shuffle.WorkflowApp
 			// Just in case, e.g. to stay away from auth
 			if customActionParam.Configuration { 
 				continue
-			}
-
-			if debug { 
-				log.Printf("[DEBUG] Appending '%s' with value %#v (%s => custom_action)", customActionParam.Name, customActionParam.Value, originalActionName)
 			}
 
 			//customActionParam.Value = path
@@ -5493,7 +5495,7 @@ func IdentifyCustomAction(ctx context.Context, app shuffle.WorkflowApp, actionNa
 	fLabels, fName, err := FindMatchingActionFromURL(ctx, app, foundMethod, foundUrl)
 	if err != nil {
 		if debug { 
-			log.Printf("[DEBUG] Reverse lookup failed for '%s' '%s': %v", foundMethod, foundUrl, err)
+			log.Printf("[DEBUG] Reverse action lookup failed for '%s' with URL '%s': %v", foundMethod, foundUrl, err)
 		}
 		return "", []string{}
 	}
