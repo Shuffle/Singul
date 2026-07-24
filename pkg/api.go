@@ -1123,6 +1123,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	matchName := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value.AppName)), " ", "_")
 	if debug && len(matchName) > 0 { 
 		log.Printf("[DEBUG] Finding appname %#v for label %#v", matchName, value.Label)
+
+		for _, app := range newapps {
+			log.Printf("[DEBUG] APPNAME: '%s'", app.Name)
+		}
 	}
 
 	for _, app := range newapps {
@@ -1180,6 +1184,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		} else {
 			appName := strings.TrimSpace(strings.ReplaceAll(strings.ToLower(app.Name), " ", "_"))
 			// If we DONT have a category app already
+			if debug { 
+				log.Printf("[DEBUG] COMPARISON: %s vs %s (%s) for input %s", appName, matchName, app.ID, value.AppName)
+			}
+
 			if app.ID == matchName || appName == matchName {
 				selectedApp = app
 				//log.Printf("[DEBUG] Found app %s vs %s (%s). Checking for label/action %s", app.Name, value.AppName, app.ID, value.Label)
@@ -3155,6 +3163,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					parsedTranslation.Success = true
 				} else {
 					log.Printf("[ERROR] Failed translating schemaless output for label '%s': %s", value.Label, err)
+
+					if parsedTranslation.Status < 300 && parsedTranslation.Status >= 200 { 
+						parsedTranslation.Success = true
+					}
 				}
 
 				/*
