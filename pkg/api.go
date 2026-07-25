@@ -64,12 +64,14 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 		resp.Header().Add("x-apprun-url", "")
 	}
 
+	authorization := request.URL.Query().Get("authorization")
+	executionId := request.URL.Query().Get("execution_id")
+	parentId := request.URL.Query().Get("parent_node")
+
 	ctx := shuffle.GetContext(request)
 	user, err := shuffle.HandleApiAuthentication(resp, request)
 	if err != nil {
 		// Look for "authorization" and "execution_id" queries
-		authorization := request.URL.Query().Get("authorization")
-		executionId := request.URL.Query().Get("execution_id")
 		if len(authorization) == 0 || len(executionId) == 0 {
 			log.Printf("[AUDIT] Api authentication failed in run category action: %s. Normal auth and Execution Auth not found. %#v & %#v", err, authorization, executionId)
 
@@ -191,7 +193,112 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 		}
 	}
 
-	RunActionWrapper(ctx, user, value, resp, request)
+	singulResp, err := RunActionWrapper(ctx, user, value, resp, request)
+	if err != nil { 
+		log.Printf("[ERROR] Error running category action: %s", err)
+		return
+	}
+
+	// Makes it so we can realtime inject it in the workflow instead of waiting (potentially)
+	// Skips request time which can be many many seconds with the app
+	// This can be quite a lot in some settings. This should improve it quite a bit
+	if len(executionId) > 0 && len(authorization) > 0 && len(parentId) > 0 && len(singulResp) > 0 {
+		parentExec, err := shuffle.GetWorkflowExecution(ctx, executionId)
+		if err != nil {
+			log.Printf("[WARNING][%s] Error with getting workflow execution in run category action: %s", executionId, err)
+			return
+		} 
+
+		if parentExec.Authorization != authorization {
+			log.Printf("[WARNING][%s] Authorization doesn't match in run category action: %s != %s", executionId, parentExec.Authorization, authorization)
+			return
+		}
+
+		startTime := int64(0)
+		parentAction := shuffle.Action{}
+		for _, action := range parentExec.Workflow.Actions {
+			if action.ID == parentId {
+				parentAction = action
+				startTime = parentExec.StartedAt+1
+				break
+			}
+		}
+
+		if len(parentAction.ID) != len(parentId) {
+			log.Printf("[WARNING][%s] Parent action not found in run category action: %s", executionId, parentId)
+			return
+		}
+
+		// Look for response headers we are returning
+		// Same as the app logic
+		if resp.Header() != nil {
+
+			// The above for-loop, but in golang
+			for key, values := range resp.Header() {
+				if !strings.HasSuffix(strings.ToLower(key), "-url") {
+					continue
+				}
+
+				parentAction.Parameters = append(parentAction.Parameters, shuffle.WorkflowAppActionParameter{
+					Name:  key,
+					Value: strings.Join(values, ","),
+				})
+			}
+		}
+
+		parentAction.Name = "run_schemaless"
+		result := shuffle.ActionResult{
+			Action:        parentAction,
+			ExecutionId:   executionId,
+			Authorization: authorization,
+			Result:        string(singulResp),
+			StartedAt:     startTime,
+			CompletedAt:   time.Now().Unix(),
+			Status:        "SUCCESS",
+		}
+
+		resultData, err := json.Marshal(result)
+		if err != nil {
+			return 
+		}
+
+		streamUrl := fmt.Sprintf("https://shuffler.io/api/v1/streams")
+		if len(os.Getenv("BASE_URL")) > 0 {
+			streamUrl = fmt.Sprintf("%s/api/v1/streams", os.Getenv("BASE_URL"))
+		}
+
+		if len(os.Getenv("SHUFFLE_CLOUDRUN_URL")) > 0 {
+			streamUrl = fmt.Sprintf("%s/api/v1/streams", os.Getenv("SHUFFLE_CLOUDRUN_URL"))
+		}
+
+		req, err := http.NewRequest(
+			"POST",
+			streamUrl,
+			bytes.NewBuffer([]byte(resultData)),
+		)
+
+		if err != nil {
+			log.Printf("[ERROR] Error creating singul request to stream result: %s", err)
+			return 
+		}
+
+		client := shuffle.GetExternalClient(streamUrl)
+		newresp, err := client.Do(req)
+		if err != nil {
+			log.Printf("[ERROR] Error sending singul request to stream result: %s", err)
+			return 
+		}
+
+		if newresp.StatusCode != 200 {
+			body, err := ioutil.ReadAll(newresp.Body)
+			if err != nil {
+				log.Printf("[ERROR] Error reading singul response body from stream result: %s", err)
+				return 
+			}
+
+			log.Printf("[ERROR] Error sending singul request to stream result: %s. Body: %s", newresp.Status, string(body))
+		}
+	}
 }
 
 type outputMarshal struct {
@@ -1124,9 +1231,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 	if debug && len(matchName) > 0 { 
 		log.Printf("[DEBUG] Finding appname %#v for label %#v", matchName, value.Label)
 
-		for _, app := range newapps {
-			log.Printf("[DEBUG] APPNAME: '%s'", app.Name)
-		}
+		//for _, app := range newapps {
+		//	log.Printf("[DEBUG] APPNAME: '%s'", app.Name)
+		//}
 	}
 
 	for _, app := range newapps {
@@ -1184,9 +1291,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 		} else {
 			appName := strings.TrimSpace(strings.ReplaceAll(strings.ToLower(app.Name), " ", "_"))
 			// If we DONT have a category app already
-			if debug { 
-				log.Printf("[DEBUG] COMPARISON: %s vs %s (%s) for input %s", appName, matchName, app.ID, value.AppName)
-			}
+			//if debug { 
+			//	log.Printf("[DEBUG] COMPARISON: %s vs %s (%s) for input %s", appName, matchName, app.ID, value.AppName)
+			//}
 
 			if app.ID == matchName || appName == matchName {
 				selectedApp = app
@@ -2956,7 +3063,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 			if httpParseErr == nil && httpOutput.Status < 300 && httpOutput.Status >= 200 {
 				if debug {
-					log.Printf("[DEBUG] Found status from schemaless: %d. Saving the current fields as base. Attempts: %d, Request Time taken: %s", httpOutput.Status, i+1, time.Now().Sub(startTime))
+					log.Printf("[DEBUG] Found status from Singul app run: %d. Saving the current fields as base. Attempts: %d, Request Time taken: %s", httpOutput.Status, i+1, time.Now().Sub(startTime))
 				}
 
 				parsedParameterMap := map[string]interface{}{}
@@ -3008,7 +3115,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 						go StoreTranslationOutput(user, fieldHash, parsedParameterMap, inputFieldMap) 
 					}
 				} else {
-					if debug { 
+					if debug && len(fieldHash) > 0 { 
 						log.Printf("[DEBUG] Translation file already FOUND (%t) for hash: %#v. Look for file: '{root}/singul/%s'. NOT creating new one.", fieldFileFound, fieldHash, discoverFile)
 					}
 				}	
@@ -3162,22 +3269,14 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 				if !selectedApp.Generated {
 					parsedTranslation.Success = true
 				} else {
-					log.Printf("[ERROR] Failed translating schemaless output for label '%s': %s", value.Label, err)
+					// Irrelevant log
+					//log.Printf("[ERROR] Failed translating schemaless output for label '%s': %s", value.Label, err)
 
 					if parsedTranslation.Status < 300 && parsedTranslation.Status >= 200 { 
 						parsedTranslation.Success = true
 					}
 				}
 
-				/*
-					err = json.Unmarshal(marshalledBody, &outputmap)
-					if err != nil {
-						log.Printf("[WARNING] Failed unmarshalling in schemaless (1) output for label %s: %s", value.Label, err)
-
-					} else {
-						parsedTranslation.Output = outputmap
-					}
-				*/
 			} else {
 				if debug {
 					log.Printf("[DEBUG] In schemaless success pre upload.")
@@ -3300,7 +3399,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 			marshalledOutput, err := json.Marshal(parsedTranslation)
 			if err != nil {
-				log.Printf("[WARNING] Failed marshalling schemaless output for label %s: %s", value.Label, err)
+				log.Printf("[ERROR] Failed marshalling schemaless output for label %s: %s. Resp length: %d", value.Label, err, len(schemalessOutput))
 				resp.WriteHeader(202)
 				resp.Write(schemalessOutput)
 				return schemalessOutput, err
@@ -3309,10 +3408,9 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			resp.WriteHeader(200)
 			resp.Write(marshalledOutput)
 			return marshalledOutput, nil
-
 		}
 
-		log.Printf("[ERROR] Done in autocorrect loop after %d iterations. This means Singul failure for action '%s' in org %s.", maxRerunAttempts, secondAction.Name, user.ActiveOrg.Id)
+		log.Printf("[ERROR] Failure in autocorrect loop after %d iterations. This means Singul failure for action '%s' in org %s.", maxRerunAttempts, secondAction.Name, user.ActiveOrg.Id)
 
 		//parsedHttp, err := json.Marshal(httpOutput)
 		//parsedTranslation.Success = false
@@ -4831,7 +4929,7 @@ func GetActionFromLabel(ctx context.Context, app shuffle.WorkflowApp, label stri
 	selectedAction := shuffle.WorkflowAppAction{}
 
 	if debug {
-		log.Printf("\n\n[DEBUG] Getting action from label '%s' in app %s (%s)\n\n", label, app.Name, app.ID)
+		log.Printf("[DEBUG] Getting action from label '%s' in app %s (%s)", label, app.Name, app.ID)
 	}
 
 	if len(app.ID) == 0 || len(app.Actions) == 0 {
@@ -5367,12 +5465,12 @@ func HandleSingulStartnode(execution shuffle.WorkflowExecution, action shuffle.A
 		}
 
 		action.AppName = "Shuffle-AI"
-		action.AppVersion = "1.0.0"
+		action.AppVersion = "1.1.0"
 		action.Name = "run_schemaless"
 
 		gceLocation := os.Getenv("SHUFFLE_GCE_LOCATION")
 		gceProject := os.Getenv("SHUFFLE_GCEPROJECT")
-		newUrl := fmt.Sprintf("https://%s-%s.cloudfunctions.net/shuffle-ai-1-0-0", gceLocation, gceProject)
+		newUrl := fmt.Sprintf("https://%s-%s.cloudfunctions.net/shuffle-ai-1-1-0", gceLocation, gceProject)
 		if len(gceLocation) == 0 || len(gceProject) == 0 {
 			log.Printf("[DEBUG] GCE location or project not set. Using default URL for schemaless.")
 		} else {
@@ -5430,11 +5528,12 @@ func HandleSingulStartnode(execution shuffle.WorkflowExecution, action shuffle.A
 		}
 
 		action.AppName = "Shuffle-AI"
+		action.AppVersion = "1.1.0"
 		action.Name = "run_schemaless"
 
 		gceLocation := os.Getenv("SHUFFLE_GCE_LOCATION")
 		gceProject := os.Getenv("SHUFFLE_GCEPROJECT")
-		newUrl := fmt.Sprintf("https://%s-%s.cloudfunctions.net/shuffle-ai-1-0-0", gceLocation, gceProject)
+		newUrl := fmt.Sprintf("https://%s-%s.cloudfunctions.net/shuffle-ai-1-1-0", gceLocation, gceProject)
 		if len(gceLocation) == 0 || len(gceProject) == 0 {
 			log.Printf("[DEBUG] GCE location or project not set. Using default URL for schemaless.")
 		} else {
