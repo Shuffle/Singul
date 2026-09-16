@@ -141,8 +141,8 @@ github.com/felixge/httpsnoop v1.0.4 h1:NFTV2Zj1bL4mc9sqWACXbQFVBBg2W3GPvqp8/ESS2
 github.com/felixge/httpsnoop v1.0.4/go.mod h1:m8KPJKqk1gH5J9DgRY2ASl2lWCfGKXixSwevea8zH2U=
 github.com/frikky/kin-openapi v0.42.0 h1:d5Z6vnuQ6RnCCPIxZaDL+TH2ODLxT8abytOt+Zh+Kd0=
 github.com/frikky/kin-openapi v0.42.0/go.mod h1:ev9OZAw7Bv5p0w93j91++6a1ElPzGcCofst+kmrWsj4=
-github.com/frikky/schemaless v0.0.34 h1:7w14wtbeBvIyKEA6ZugEPHyDV8maxMm3FOHWTEeIN+M=
-github.com/frikky/schemaless v0.0.34/go.mod h1:m9s+6gALXhA5ZERCrJw+jI2rRtTPNa8mkl4vav9sxnY=
+github.com/frikky/schemaless v0.0.35 h1:x5AO5y3Eha/0rgEH6/2uu0hTmWvsiGFeDnaniyeLKXs=
+github.com/frikky/schemaless v0.0.35/go.mod h1:0KwlQLk8AxAeuyNn/HJxDGQTJEBD3hrfYb9/4Bw6EOg=
 github.com/fxamacker/cbor/v2 v2.9.0 h1:NpKPmjDBgUfBms6tr6JZkTHtfFGcMKsw3eGcmD/sapM=
 github.com/fxamacker/cbor/v2 v2.9.0/go.mod h1:vM4b+DJCtHn+zz7h3FFp/hDAI9WNWCsZj23V5ytsSxQ=
 github.com/ghodss/yaml v1.0.0 h1:wQHKEahhL6wmXdzwWG11gIVCkOv05bNOh+Rxn0yngAk=

@@ -9,7 +9,7 @@ go 1.25.0
 require (
 	github.com/andybalholm/brotli v1.2.0
 	github.com/frikky/kin-openapi v0.42.0
-	github.com/frikky/schemaless v0.0.34
+	github.com/frikky/schemaless v0.0.35
 	github.com/satori/go.uuid v1.2.0
 	github.com/shuffle/shuffle-shared v1.3.9
 	github.com/spf13/cobra v1.9.1
