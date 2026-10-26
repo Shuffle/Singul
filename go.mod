@@ -7,7 +7,7 @@ go 1.25.0
 //replace github.com/shuffle/shuffle-shared => ../shuffle-shared
 
 require (
-	github.com/andybalholm/brotli v1.2.0
+	github.com/andybalholm/brotli v1.2.7
 	github.com/frikky/kin-openapi v0.42.0
 	github.com/frikky/schemaless v0.0.34
 	github.com/satori/go.uuid v1.2.0
