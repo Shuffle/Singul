@@ -31,8 +31,8 @@ import (
 )
 
 // Runs attempts up to X times
-var maxRerunAttempts = 7
-// var maxRerunAttempts = 3
+var maxRerunAttempts = 2
+// var maxRerunAttempts = 7
 var standalone = false
 var debug = os.Getenv("DEBUG") == "true"
 var basepath = os.Getenv("SHUFFLE_FILE_LOCATION")
@@ -908,6 +908,10 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 
 	if len(user.ActiveOrg.Id) > 0 && len(value.OrgId) == 0 {
 		value.OrgId = user.ActiveOrg.Id
+	}
+
+	if len(value.ExecutionId) == 0 && request != nil && request.URL != nil {
+		value.ExecutionId = request.URL.Query().Get("execution_id")
 	}
 
 	if strings.HasPrefix(value.Label, "()") {
@@ -2100,6 +2104,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			Y: 100.0,
 		},
 		AuthenticationId: foundAuthenticationId,
+		SourceExecution:  value.ExecutionId,
 		IsValid:          true,
 		//ReferenceUrl:     refUrl,
 	}
@@ -2581,7 +2586,7 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 			//formattedQueryFields = append(formattedQueryFields, fmt.Sprintf("%s=%s", field.Key, field.Value))
 
 			secondAction.Name = originalActionName
-			newOutputAction, _, err := shuffle.RunSelfCorrectingRequest(ctx, formattedQueryFieldsValueReplace, secondAction, 400, formattedQuery, fullUrl, outputBody, secondAction.AppName, value.Query, inputdata, 0)
+			newOutputAction, _, err := shuffle.RunSelfCorrectingRequest(ctx, formattedQueryFieldsValueReplace, secondAction, 400, formattedQuery, fullUrl, outputBody, secondAction.AppName, value.Query, inputdata, value.OrgId, 0)
 
 			if err != nil {
 				log.Printf("[ERROR] Failed running self-correcting request for custom_action: %s", err)
@@ -3138,19 +3143,26 @@ func RunActionWrapper(ctx context.Context, user shuffle.User, value shuffle.Cate
 					// apprunBody: the response body we got back from the app
 					// additionalInfo: recursively filled in from this function 
 					// inputQuery: the input we got initially
-					outputString, outputAction, err, additionalInfo := shuffle.FindNextApiStep(
-						ctx,
-						value.Fields,
-						secondAction, 
-						apprunBody, 
-						additionalInfo, 
-						inputQuery, 
-						originalAppname, 
+					var outputString string
+					var outputAction shuffle.Action
+					if i < maxRerunAttempts-1 {
+						outputString, outputAction, err, additionalInfo = shuffle.FindNextApiStep(
+							ctx,
+							value.Fields,
+							secondAction, 
+							apprunBody, 
+							additionalInfo, 
+							inputQuery, 
+							originalAppname, 
+							value.OrgId,
 
-						i+1,
-					)
-					if debug {
-						log.Printf("[DEBUG]\n==== AUTOCORRECT ====\nOUTPUTSTRING: %s\nADDITIONALINFO: %s", outputString, additionalInfo)
+							i+1,
+						)
+						if debug {
+							log.Printf("[DEBUG]\n==== AUTOCORRECT ====\nOUTPUTSTRING: %s\nADDITIONALINFO: %s", outputString, additionalInfo)
+						}
+					} else {
+						err = httpParseErr
 					}
 
 					// Rewriting before continuing
